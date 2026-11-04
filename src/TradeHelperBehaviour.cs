@@ -8,7 +8,7 @@ namespace TradeHelper
 {
     public class TradeHelperBehaviour : MonoBehaviour
     {
-        public const string Version = "0.3.6";
+        public const string Version = "0.3.7";
         public static TradeHelperBehaviour Instance;
 
         Config cfg;
@@ -30,6 +30,7 @@ namespace TradeHelper
             Plans.Load();
             nextExport = Time.unscaledTime + 60f;
             settlement.MarketFinished += _ => refreshAfterSettlement = true;
+            if (SelfTest.Requested()) gameObject.AddComponent<SelfTest>();
         }
 
         public void SetVisible(bool on)
@@ -50,6 +51,8 @@ namespace TradeHelper
         }
 
         bool Visible => window != null && window.Visible;
+        public Snapshot Latest => latest;
+        public bool Scanning => job != null;
 
         // Starts a background scan (no-op when one is already running unless restart is asked).
         public void RequestRefresh(bool restart)
@@ -234,6 +237,13 @@ namespace TradeHelper
                 Perf.EndFrame(cfg);
             }
             catch (Exception e) { Debug.LogWarning("[TradeHelper] update: " + e); }
+        }
+
+        // Hide the panel before the game tears its objects down: text meshes disabled after their materials are gone
+        // throw (seen when quitting with the panel open).
+        void OnApplicationQuit()
+        {
+            try { if (window != null && window.canvasGo != null) window.canvasGo.SetActive(false); } catch { }
         }
 
         static bool TypingInInput()
