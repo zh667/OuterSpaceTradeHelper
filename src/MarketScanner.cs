@@ -25,6 +25,8 @@ namespace TradeHelper
         public double depth, pressure;
         public float minCoef;
         public FWExchangeSpaceNormalGoods normal;
+        public FWExchangeSpaceSpecialGoods specialGoods;
+        public double occupancy;      // special: store occupancy = sum of the items' durability factors (getStoreOccupancy)
         public double buy1, sell1;    // first unit, tax included (cached at scan time)
 
         const double Ln4Half = 0.69314718055994530942; // ln(4)/2, FWTradePricePressure.CurveLog(4, 2)
@@ -53,13 +55,13 @@ namespace TradeHelper
         // FWExchangeSpaceSpecialGoods.calculatePrice: each unit is priced at the occupancy before it moves.
         public double BuyUnit(int i)
         {
-            if (special) return SpecialAt(stock - i);
+            if (special) return SpecialAt(occupancy - i);
             return NormalAt(stock - i - 0.5, pressure + i + 0.5);
         }
 
         public double SellUnit(int i)
         {
-            if (special) return SpecialAt(stock + i);
+            if (special) return SpecialAt(occupancy + i);
             return NormalAt(stock + i + 0.5, pressure - i - 0.5);
         }
 
@@ -88,6 +90,28 @@ namespace TradeHelper
                 try { return normal.QuoteTrade(-k).rawPrice * (1 + tax); } catch { }
             }
             return SumUnits(k, true) * (1 + tax);
+        }
+
+        // Revenue after tax for selling units [from, from + k) of the player's own items. Special goods in an up-to-date
+        // market are priced by the game itself (FWExchangeSpaceSpecialGoods.getPriceForPlayerSell, the checkout's price:
+        // it also weighs each item's durability, and moves the store by that durability). Otherwise the model.
+        public double SellHeld(int from, int k, List<FWBaseBean> items)
+        {
+            if (k <= 0) return 0;
+            if (special && exact && specialGoods != null && items != null && from + k <= items.Count)
+            {
+                try
+                {
+                    var sorted = new List<FWBaseBean>(items);
+                    var sg = specialGoods;
+                    sorted.Sort((a, b) => sg.getPDurability(b).CompareTo(sg.getPDurability(a)));
+                    double b2 = sg.getPriceForPlayerSell(sorted.GetRange(0, from + k));
+                    double a2 = from > 0 ? sg.getPriceForPlayerSell(sorted.GetRange(0, from)) : 0;
+                    if (b2 > 0) return (b2 - a2) * (1 - tax);
+                }
+                catch { }
+            }
+            return SellRevenue(from + k) - (from > 0 ? SellRevenue(from) : 0);
         }
 
         public double SellRevenue(int k)
@@ -139,6 +163,8 @@ namespace TradeHelper
         public Dictionary<string, string> galaxyName = new Dictionary<string, string>();
         public Dictionary<string, List<string>> stationNames = new Dictionary<string, List<string>>(); // galaxy -> stations with a trade button
         public Dictionary<string, string> baseOnStar = new Dictionary<string, string>();               // starId -> player's base name
+        public Dictionary<string, List<FWBaseBean>> heldItems = new Dictionary<string, List<FWBaseBean>>(); // key -> the player's items, one entry per unit
+        public List<FWBaseBean> Held(string key) { List<FWBaseBean> l; return key != null && heldItems.TryGetValue(key, out l) ? l : null; }
         public List<InvLocation> inventory = new List<InvLocation>();
         public Dictionary<string, string> itemKeyToGid = new Dictionary<string, string>();
         public Dictionary<string, string> itemNames = new Dictionary<string, string>();
@@ -150,6 +176,8 @@ namespace TradeHelper
         public int marketsDone, marketsTotal, marketsReused;
         public bool complete, adviceReused;
         public string phase = "";
+        // Memory allocated by each part of the scan (bytes; steps during which a garbage collection ran are not counted).
+        public long allocRead, allocInventory, allocTrades, allocSells; public int allocSkipped;
         public double maxStepMs;
         public string maxStepPhase = "";
         public long inventoryHash;
@@ -209,6 +237,17 @@ namespace TradeHelper
         static float EventPrice(long uid, string gid)
         {
             try { return FWGalaxyEventTradeEffects.Get(uid, gid).Price; } catch { return 1f; }
+        }
+
+        // The tax the player actually pays: PageTradeInventory.GetCurrentTaxRate() =
+        // FWGlobalParameter.ApplyTradeTaxRate(exchange.getTaxRate()), applied to the whole cart at checkout
+        // (buy x (1 + t), sell x (1 - t)). It is the market's rate (average of its towns/stations), not the per-goods
+        // getTaxRate(goodsId), which only feeds the market's own history. getTaxRate() reads the stations' rates and does
+        // not settle the market.
+        public static float TradeTax(FWExchangeSpace ex)
+        {
+            try { return FWGlobalParameter.ApplyTradeTaxRate(ex.getTaxRate()); }
+            catch { return SnapshotTax(ex); }
         }
 
         static float SnapshotTax(FWExchangeSpace ex)
@@ -335,6 +374,7 @@ namespace TradeHelper
             h = Mix(h, (long)(ex.pendingSettlementDays != null ? ex.pendingSettlementDays.Count : 0));
             h = Mix(h, ex.storeInitialized ? 1L : 0L);
             h = Mix(h, ex.latestEconomicRevision);
+            h = Mix(h, (double)TradeTax(ex));
             try { h = Mix(h, (double)ex.getTradeS()); h = Mix(h, (double)ex.getBGlobal()); } catch { }
             try
             {
@@ -547,7 +587,7 @@ namespace TradeHelper
         {
             var e = new Econ();
             long t0 = Perf.Now;
-            try { e.tax = ex.getTaxRate(it.GoodID); } catch { e.tax = fallbackTax; }
+            e.tax = fallbackTax; // the per-goods rate is not what the player pays (see TradeTax)
             long t1 = Perf.Now; Budget.tTax += t1 - t0;
             try { e.pool = ex.getEPool(it.GoodID); } catch { e.pool = def.MarketSize; }
             long t2 = Perf.Now; Budget.tPool += t2 - t1;
@@ -563,7 +603,7 @@ namespace TradeHelper
             m.ex = ex;
             m.initialized = ex.storeInitialized && ex.itemList != null;
             m.pendingDays = ex.pendingSettlementDays != null ? ex.pendingSettlementDays.Count : 0;
-            m.tax = SnapshotTax(ex);
+            m.tax = TradeTax(ex);
             if (!m.initialized) yield break;
             bool exact = m.Exact;
             float S = 1f, BG = 0f;
@@ -632,10 +672,11 @@ namespace TradeHelper
                 }
                 // A market that owes days keeps the last values read while it was up to date (an estimate).
                 float lean = e != null ? e.lean : 1f;
-                if (e != null) { q.tax = e.tax; q.ePool = e.pool; }
+                // Checkout charges the market's rate on every goods line (see TradeTax).
+                q.tax = m.tax;
+                if (e != null) q.ePool = e.pool;
                 else
                 {
-                    try { q.tax = ex.getTaxRate(it.GoodID); } catch { q.tax = m.tax; }
                     try { q.ePool = ex.getEPool(it.GoodID); } catch { q.ePool = def.MarketSize; }
                 }
                 if (q.ePool <= 0) q.ePool = Math.Max(1, def.MarketSize);
@@ -662,6 +703,16 @@ namespace TradeHelper
                     if (sg == null) continue;
                     q.special = true;
                     q.stock = sg.goodsList != null ? sg.goodsList.Count : 0;
+                    q.specialGoods = sg;
+                    // Same as getStoreOccupancy() without its settlement call: the sum of the stored items' durability factors.
+                    double occ = 0;
+                    if (sg.goodsList != null)
+                        for (int gi = 0; gi < sg.goodsList.Count; gi++)
+                        {
+                            var g = sg.goodsList[gi];
+                            if (g != null && g.goods != null) { try { occ += sg.getPDurability(g.goods); } catch { occ += 1; } }
+                        }
+                    q.occupancy = occ;
                     q.buyable = !sg.isContraband && q.stock > 0;
                     q.minCoef = sg.itemType == 550 ? 0.5f : 0.1f;
                     // Same arithmetic as FWExchangeSpaceSpecialGoods.getPBase(), times the event price factor that
@@ -677,7 +728,7 @@ namespace TradeHelper
             }
         }
 
-        static void AddThings(InvLocation loc, IEnumerable<FWThingBean> things)
+        static void AddThings(InvLocation loc, IEnumerable<FWThingBean> things, Snapshot snap)
         {
             if (things == null) return;
             foreach (var t in things)
@@ -686,7 +737,15 @@ namespace TradeHelper
                 var k = t.type + "_" + t.id;
                 int v; loc.items.TryGetValue(k, out v);
                 loc.items[k] = v + t.sum;
+                AddHeld(snap, k, t, Math.Min(t.sum, 200));
             }
+        }
+
+        static void AddHeld(Snapshot snap, string key, FWBaseBean item, int n)
+        {
+            List<FWBaseBean> l;
+            if (!snap.heldItems.TryGetValue(key, out l)) snap.heldItems[key] = l = new List<FWBaseBean>();
+            for (int i = 0; i < n && l.Count < 200; i++) l.Add(item);
         }
 
         static string SpName(FWSpaceport sp)
@@ -703,7 +762,7 @@ namespace TradeHelper
             if (mother != null && mother.starSpread != null)
             {
                 var loc = new InvLocation { name = "母舰", galaxyId = snap.fleetGalaxyId };
-                AddThings(loc, new List<FWThingBean>(mother.starSpread.things));
+                AddThings(loc, new List<FWThingBean>(mother.starSpread.things), snap);
                 seen.Add(mother.starMapId);
                 snap.inventory.Add(loc);
             }
@@ -721,7 +780,7 @@ namespace TradeHelper
                             if (map.type != FWStarMapInfo.TYPE_DEPUTY_BASE && map.type != FWStarMapInfo.TYPE_ROOT_BASE) continue;
                             seen.Add(map.starMapId);
                             var loc = new InvLocation { name = (string.IsNullOrEmpty(map.name) ? (st.starName ?? st.starId) : map.name) + "（基地）", galaxyId = g.id };
-                            AddThings(loc, new List<FWThingBean>(map.starSpread.things));
+                            AddThings(loc, new List<FWThingBean>(map.starSpread.things), snap);
                             snap.inventory.Add(loc);
                         }
                     }
@@ -733,7 +792,7 @@ namespace TradeHelper
                 {
                     var loc = new InvLocation { name = (string.IsNullOrEmpty(fleet.name) ? "舰队" : fleet.name) + "（舰队货仓）", galaxyId = fleet.pos?.galaxyId };
                     var things = fleet.getThings();
-                    if (things != null) AddThings(loc, new List<FWThingBean>(things));
+                    if (things != null) AddThings(loc, new List<FWThingBean>(things), snap);
                     snap.inventory.Add(loc);
                 }
             }
@@ -746,7 +805,7 @@ namespace TradeHelper
                     {
                         if (sp?.things == null || sp.things.Count == 0) continue;
                         var loc = new InvLocation { name = snap.GalaxyName(sp.galaxyId) + " " + SpName(sp) + " 仓库", galaxyId = sp.galaxyId };
-                        AddThings(loc, new List<FWThingBean>(sp.things));
+                        AddThings(loc, new List<FWThingBean>(sp.things), snap);
                         if (loc.items.Count > 0) snap.inventory.Add(loc);
                     }
             }
@@ -760,6 +819,7 @@ namespace TradeHelper
                     var k = "58_" + d.roleId;
                     int v; loc.items.TryGetValue(k, out v);
                     loc.items[k] = v + 1;
+                    AddHeld(snap, k, d, 1);
                 }
                 snap.inventory.Add(loc);
             }

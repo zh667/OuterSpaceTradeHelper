@@ -8,7 +8,7 @@ namespace TradeHelper
 {
     public class TradeHelperBehaviour : MonoBehaviour
     {
-        public const string Version = "0.3.4";
+        public const string Version = "0.3.5";
         public static TradeHelperBehaviour Instance;
 
         Config cfg;
@@ -115,8 +115,11 @@ namespace TradeHelper
                 while (!Budget.Over)
                 {
                     long ts = Perf.Now;
+                    var phaseBefore = building != null ? building.phase : null;
+                    var al = Perf.AllocBegin();
                     bool more = job.MoveNext();
                     double stepMs = Perf.Ms(Perf.Now - ts);
+                    if (building != null) CountAlloc(building, phaseBefore, al);
                     if (building != null && stepMs > building.maxStepMs) { building.maxStepMs = stepMs; building.maxStepPhase = building.phase; }
                     if (!more)
                     {
@@ -124,7 +127,9 @@ namespace TradeHelper
                         latest = building; building = null;
                         var line = "扫描完成 " + DateTime.Now.ToString("HH:mm:ss") + "：" + latest.markets.Count + " 站, " + latest.trades.Count + " 条跑商, " + latest.sells.Count + " 条卖货, 用时 " +
                                    latest.scanMs + "ms 分 " + jobFrames + " 帧（每帧上限 " + budget.ToString("0") + "ms）, 沿用未变的站 " + latest.marketsReused + "/" + latest.markets.Count +
-                                   (latest.adviceReused ? ", 建议沿用" : ", 建议重算") + ", 最长一步 " + latest.maxStepMs.ToString("0.0") + "ms（" + latest.maxStepPhase + "）; " + Budget.Report();
+                                   (latest.adviceReused ? ", 建议沿用" : ", 建议重算") +
+                                   ", 分配 读站 " + Mb(latest.allocRead) + " 库存 " + Mb(latest.allocInventory) + " 跑商建议 " + Mb(latest.allocTrades) + " 卖货建议 " + Mb(latest.allocSells) +
+                                   (latest.allocSkipped > 0 ? "（" + latest.allocSkipped + " 步赶上回收没算）" : "") + ", 最长一步 " + latest.maxStepMs.ToString("0.0") + "ms（" + latest.maxStepPhase + "）; " + Budget.Report();
                         Perf.LastScan = line;
                         Perf.Write(line, cfg);
                         Debug.Log("[TradeHelper] " + line);
@@ -149,6 +154,22 @@ namespace TradeHelper
                 Debug.LogWarning("[TradeHelper] scan: " + e);
             }
             Perf.Add(Perf.Cat.Scan, pt);
+        }
+
+        static string Mb(long b) => (b / 1048576.0).ToString("0.0") + "MB";
+
+        // Attributes a scan step's allocation to the phase it ran in (the phase is set at the start of each part).
+        static void CountAlloc(Snapshot b, string phaseBefore, Perf.Alloc a)
+        {
+            if (GC.CollectionCount(0) != a.gc) { b.allocSkipped++; return; }
+            long d = GC.GetTotalMemory(false) - a.mem;
+            if (d <= 0) return;
+            string ph = b.phase ?? phaseBefore ?? "";
+            if (ph.StartsWith("读站")) b.allocRead += d;
+            else if (ph == "读库存") b.allocInventory += d;
+            else if (ph == "算跑商建议") b.allocTrades += d;
+            else if (ph == "算卖货建议") b.allocSells += d;
+            else b.allocRead += d;
         }
 
         void UpdateStatus()

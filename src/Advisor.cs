@@ -160,7 +160,7 @@ namespace TradeHelper
                         if (q.SellUnit(mid) * (1 - q.tax) >= first * 0.5) lo = mid; else hi = mid - 1;
                     }
                     int sold = lo + 1;
-                    double rev = q.SellRevenue(sold);
+                    double rev = q.SellHeld(0, sold, snap.Held(kv.Key));
                     if (sold <= 0) continue;
                     if (best == null || rev > best.revenue)
                         best = new SellIdea { key = kv.Key, have = kv.Value, qty = sold, market = q, revenue = rev, firstUnitNet = first };

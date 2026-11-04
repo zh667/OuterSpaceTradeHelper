@@ -13,6 +13,8 @@
 - **导出**：`latest.json` 和截图默认在 `%USERPROFILE%/AppData/LocalLow/CatStudio/Outer Space/TradeHelper/`，可在设置页改到游戏目录里本模组的 `data` 文件夹或任意文件夹（`config.json` 固定在默认位置）。
 
 ## 准确性
+- 税：按游戏结账时用的市场税率（`ApplyTradeTaxRate(getTaxRate())`，整车统一扣），不是每种货自己的税率。
+- 特殊货（舰载机、DNA 等）：库存占用按每件的耐久系数累加；卖自己手上的货时，在实时站直接用游戏的出售报价（`getPriceForPlayerSell`，含耐久折价）。
 - 站点没有欠结算天数时，价格直接来自游戏自己的计价函数（`GetBasePriceFactor`、`QuoteTrade`、`getPBase`、`getTaxRate`、`getEPool`），与游戏交易所一致。
 - 欠天数的站不会被这些函数碰到（它们会触发补算），只读存着的数据估价，并标“估·欠 N 天”。
 - 距离与游戏一致：星门航线（`GalaxyDistanceUnit.TryCalculateGalaxyFieldRouteToAu`），显示格式用游戏的 `UIUntils.distanceAu`。
