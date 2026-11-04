@@ -29,6 +29,8 @@ namespace TradeHelper
         public float minProfit = 0;
         public bool goodsBuyableOnly = false;
         public bool hideContraband = true;
+        // Galaxies the player has not discovered are not on the map; leave them out of advice unless asked.
+        public bool includeUndiscovered = false;
 
         // Where latest.json and screenshots go: 0 = the game's data folder on C: (LocalLow), 1 = inside the mod's own
         // folder in the game directory (<game>/mods/TradeHelper/data), 2 = a folder the player typed.

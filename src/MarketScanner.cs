@@ -113,6 +113,8 @@ namespace TradeHelper
         public List<GoodsQuote> goods = new List<GoodsQuote>();
         public Dictionary<string, GoodsQuote> byGid = new Dictionary<string, GoodsQuote>();
         public double fleetAu = -1;
+        public int observe;          // galaxy exploration state: 0 = not discovered (not on the player's map), 1 = observed, 2 = explored
+        public bool Discovered => observe >= 1;
         public bool Exact => initialized && pendingDays == 0;
         public string Freshness => !initialized ? "未开过" : pendingDays == 0 ? "实时" : ("欠" + pendingDays + "天");
     }
@@ -224,12 +226,12 @@ namespace TradeHelper
                 string gname;
                 try { gname = g.getName(); } catch { gname = "星系" + g.id; }
                 if (g.exchangeSpace != null)
-                    yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(g.exchangeSpace, new MarketInfo { uid = g.exchangeSpace.uid, name = gname + " 空间站", galaxyId = g.id });
+                    yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(g.exchangeSpace, new MarketInfo { uid = g.exchangeSpace.uid, name = gname + " 空间站", galaxyId = g.id, observe = g.observaState });
                 if (g.stars == null) continue;
                 foreach (var st in g.stars)
                 {
                     if (st?.exchangeSpace == null) continue;
-                    yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(st.exchangeSpace, new MarketInfo { uid = st.exchangeSpace.uid, name = (st.starName ?? st.starId) + "（星球市场）", galaxyId = g.id, planet = true });
+                    yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(st.exchangeSpace, new MarketInfo { uid = st.exchangeSpace.uid, name = (st.starName ?? st.starId) + "（星球市场）", galaxyId = g.id, planet = true, observe = g.observaState });
                 }
             }
         }

@@ -16,6 +16,7 @@ namespace TradeHelper
         public double fleetAu = -1;  // player fleet -> buy market
         public double TotalAu => (legAu < 0 || fleetAu < 0) ? -1 : legAu + fleetAu;
         public bool Stale => !buy.market.Exact || !sell.market.Exact;
+        public int planBuyOffset, planSellOffset; // units already claimed at these stations by the player's open plans
         public int MaxPending => Math.Max(buy.market.pendingDays, sell.market.pendingDays);
     }
 
@@ -37,6 +38,7 @@ namespace TradeHelper
         static bool Usable(GoodsQuote q, Config cfg)
         {
             if (q == null || q.contraband) return false;
+            if (!q.market.Discovered && !cfg.includeUndiscovered) return false;
             if (!q.market.Exact && q.market.pendingDays > cfg.maxStaleDays) return false;
             return true;
         }
@@ -52,6 +54,16 @@ namespace TradeHelper
                     if (!byGid.TryGetValue(q.gid, out l)) byGid[q.gid] = l = new List<GoodsQuote>();
                     l.Add(q);
                 }
+            // Units the player's open plans will still buy/sell at a station: new advice starts after them, so it does
+            // not count on the same cheap stock or the same buyer twice.
+            var plannedBuy = new Dictionary<string, int>();
+            var plannedSell = new Dictionary<string, int>();
+            foreach (var p in Plans.list)
+            {
+                if (p.state == 2) continue;
+                if (p.state == 0 && p.buyUid >= 0) { var k = p.buyUid + "|" + p.gid; int v; plannedBuy.TryGetValue(k, out v); plannedBuy[k] = v + p.qty; }
+                { var k = p.sellUid + "|" + p.gid; int v; plannedSell.TryGetValue(k, out v); plannedSell[k] = v + p.HoldQty; }
+            }
             var ideas = new List<TradeIdea>();
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             foreach (var kv in byGid)
@@ -70,7 +82,10 @@ namespace TradeHelper
                     {
                         var b = buys[bi]; var s = sells[si];
                         if (b.market == s.market || s.sell1 <= b.buy1) continue;
-                        var idea = BestQuantity(b, s);
+                        int ob, os;
+                        plannedBuy.TryGetValue(b.market.uid + "|" + b.gid, out ob);
+                        plannedSell.TryGetValue(s.market.uid + "|" + s.gid, out os);
+                        var idea = BestQuantity(b, s, ob, os);
                         if (idea != null && (best == null || idea.Profit > best.Profit)) best = idea;
                     }
                 if (best == null || best.Profit <= 0) continue;
@@ -89,11 +104,11 @@ namespace TradeHelper
         // i: buying lowers the seller's stock (price up) and selling raises the buyer's stock (price down). So the best
         // quantity is the last unit whose marginal profit is still positive; a binary search finds exactly the same
         // quantity as walking unit by unit.
-        static TradeIdea BestQuantity(GoodsQuote b, GoodsQuote s)
+        static TradeIdea BestQuantity(GoodsQuote b, GoodsQuote s, int ob, int os)
         {
-            int maxUnits = b.special ? Math.Min(b.stock, MaxSpecialUnits) : b.stock;
+            int maxUnits = (b.special ? Math.Min(b.stock, MaxSpecialUnits) : b.stock) - ob;
             if (maxUnits <= 0) return null;
-            Func<int, double> marg = i => s.SellUnit(i) * (1 - s.tax) - b.BuyUnit(i) * (1 + b.tax);
+            Func<int, double> marg = i => s.SellUnit(i + os) * (1 - s.tax) - b.BuyUnit(i + ob) * (1 + b.tax);
             if (marg(0) <= 0) return null;
             int lo = 0, hi = maxUnits - 1;
             while (lo < hi)
@@ -102,9 +117,10 @@ namespace TradeHelper
                 if (marg(mid) > 0) lo = mid; else hi = mid - 1;
             }
             int q = lo + 1;
-            var idea = new TradeIdea { gid = b.gid, buy = b, sell = s, qty = q };
-            idea.cost = b.BuyCost(q);       // exact game quote when the market is up to date
-            idea.revenue = s.SellRevenue(q);
+            var idea = new TradeIdea { gid = b.gid, buy = b, sell = s, qty = q, planBuyOffset = ob, planSellOffset = os };
+            // Exact game quotes when the market is up to date; units already claimed by plans are priced first.
+            idea.cost = b.BuyCost(ob + q) - (ob > 0 ? b.BuyCost(ob) : 0);
+            idea.revenue = s.SellRevenue(os + q) - (os > 0 ? s.SellRevenue(os) : 0);
             return idea;
         }
 

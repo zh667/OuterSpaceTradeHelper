@@ -42,11 +42,12 @@ namespace TradeHelper.Ui
             x += 228;
             sort = Drop("排序：", x, 0, w.BodyW - x, new List<string> { "净赚从高到低", "每光年净赚从高到低", "利润率从高到低", "到手从高到低", "成本从低到高", "舰队距离从近到远", "航程从近到远" }, 0,
                 i => { table.sortCol = SortCol[i]; table.desc = SortDesc[i]; table.Resort(); SaveSort(); });
-            Kit.TxtAt(root, "按两边的税和买卖时的价格变化算到“再多买就开始亏”为止。违禁品不出现（游戏不让买卖）。“估”= 那个站还欠结算天数，到站一打开价格会变，可在“后台补算”页先补。", 0, 34, w.BodyW, 22, 14, Theme.Text2);
+            Kit.TxtAt(root, "算到“再多买就开始亏”为止，两边税都扣了。违禁品、没发现的星系不出现。* = 已扣掉你计划里在同一站要买/卖的数量。“估”= 那个站欠结算天数。", 0, 34, w.BodyW - 200, 22, 14, Theme.Text2);
+            Kit.Toggle(root, "含未发现的星系", w.BodyW - 190, 31, 190, cfg.includeUndiscovered, v => { cfg.includeUndiscovered = v; cfg.Save(); host.RequestRefresh(true); });
 
             var cols = new List<Column<TradeIdea>>
             {
-                new Column<TradeIdea> { title = "商品", width = 150, text = t => t.name, key = t => t.name },
+                new Column<TradeIdea> { title = "商品", width = 150, text = t => t.name + (t.planBuyOffset > 0 || t.planSellOffset > 0 ? " *" : ""), key = t => t.name },
                 new Column<TradeIdea> { title = "类别", width = 70, text = t => t.category, key = t => t.category, color = _ => Theme.Text2 },
                 new Column<TradeIdea> { title = "在哪买", width = 185, text = t => t.buy.market.name, key = t => t.buy.market.name, color = t => Fmt.FreshColor(t.buy.market) },
                 new Column<TradeIdea> { title = "买几个", width = 64, text = t => t.qty.ToString(), key = t => t.qty, numeric = true, align = TextAlignmentOptions.MidlineRight },
@@ -157,7 +158,7 @@ namespace TradeHelper.Ui
             const float LW = 500;
             var mcols = new List<Column<MarketInfo>>
             {
-                new Column<MarketInfo> { title = "站", width = 220, text = m => m.name, key = m => m.name },
+                new Column<MarketInfo> { title = "站", width = 220, text = m => m.name + (m.Discovered ? "" : "（未发现）"), key = m => m.name, color = m => m.Discovered ? Theme.Text : Theme.Text2 },
                 new Column<MarketInfo> { title = "数据", width = 78, text = m => m.Freshness, key = m => m.initialized ? m.pendingDays : 100000, numeric = true, color = Fmt.FreshColor },
                 new Column<MarketInfo> { title = "税", width = 56, text = m => (m.tax * 100).ToString("0") + "%", key = m => m.tax, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<MarketInfo> { title = "距舰队", width = 130, text = m => Fmt.Dist(m.fleetAu), key = m => m.fleetAu < 0 ? (IComparable)null : m.fleetAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
@@ -301,6 +302,7 @@ namespace TradeHelper.Ui
             public long uid;
             public string name;
             public double fleetAu;
+            public bool discovered;
             public bool Initialized { get { try { return ex.storeInitialized; } catch { return false; } } }
             public int Pending { get { try { return ex.pendingSettlementDays != null ? ex.pendingSettlementDays.Count : 0; } catch { return 0; } } }
         }
@@ -341,7 +343,7 @@ namespace TradeHelper.Ui
             initAll = Kit.Button(root, "", 0, 30, BW, 32, () =>
             {
                 if (cancelInit) host.settlement.Cancel(uid => IsUninitialized(uid));
-                else foreach (var s in table.all) if (!s.Initialized) host.settlement.Enqueue(s.uid);
+                else foreach (var s in table.all) if (!s.Initialized && s.discovered) host.settlement.Enqueue(s.uid);
                 nextBind = 0;
             });
             catchAll = Kit.Button(root, "", BW + Gap, 30, BW, 32, () =>
@@ -352,7 +354,7 @@ namespace TradeHelper.Ui
             });
             pauseBtn = Kit.Button(root, "暂停", (BW + Gap) * 2, 30, BW, 32, () => { host.settlement.paused = !host.settlement.paused; nextBind = 0; });
             Kit.Button(root, "全部取消", (BW + Gap) * 3, 30, BW, 32, () => { host.settlement.CancelAll(); nextBind = 0; });
-            Drop("显示：", (BW + Gap) * 4, 30, BW, new List<string> { "全部", "未开过", "欠天", "实时", "保持实时的" }, 0, i => { show = i; table.Resort(); });
+            Drop("显示：", (BW + Gap) * 4, 30, BW, new List<string> { "全部", "未开过", "欠天", "实时", "保持实时的", "未发现星系" }, 0, i => { show = i; table.Resort(); });
             info = Kit.TxtAt(root, "", 0, 68, w.BodyW, 26, 15, Theme.Text);
             var cols = new List<Column<Station>>
             {
@@ -367,14 +369,14 @@ namespace TradeHelper.Ui
             };
             table = new Table<Station>(root, 0, 100, w.BodyW, w.BodyH - 100, cols, cfg.settleSort, cfg.settleDesc);
             table.sortChanged = (c, d) => { cfg.settleSort = c; cfg.settleDesc = d; cfg.Save(); };
-            table.filter = s => show == 0 || (show == 1 && !s.Initialized) || (show == 2 && s.Initialized && s.Pending > 0) || (show == 3 && s.Initialized && s.Pending == 0) || (show == 4 && cfg.keepFresh.Contains(s.uid));
+            table.filter = s => show == 0 || (show == 1 && !s.Initialized) || (show == 2 && s.Initialized && s.Pending > 0) || (show == 3 && s.Initialized && s.Pending == 0) || (show == 4 && cfg.keepFresh.Contains(s.uid)) || (show == 5 && !s.discovered);
         }
 
         public override void OnSnapshot(Snapshot s)
         {
             base.OnSnapshot(s);
             var rows = new List<Station>();
-            foreach (var m in s.markets) rows.Add(new Station { ex = m.ex, uid = m.uid, name = m.name, fleetAu = m.fleetAu });
+            foreach (var m in s.markets) rows.Add(new Station { ex = m.ex, uid = m.uid, name = m.name + (m.Discovered ? "" : "（未发现）"), fleetAu = m.fleetAu, discovered = m.Discovered });
             table.SetData(rows);
         }
 
@@ -387,12 +389,12 @@ namespace TradeHelper.Ui
             foreach (var s in table.all)
             {
                 bool q = st.IsQueued(s.uid);
-                if (!s.Initialized) { un++; if (q) qInit++; }
+                if (!s.Initialized) { if (s.discovered) un++; if (q) qInit++; }
                 else { if (s.Pending > 0) owe++; if (q) qCatch++; }
             }
             cancelInit = qInit > 0;
             cancelCatch = qCatch > 0;
-            initAll.Text = cancelInit ? "取消初始化（还剩 " + qInit + " 站）" : "一键初始化未开过的站（" + un + "）";
+            initAll.Text = cancelInit ? "取消初始化（还剩 " + qInit + " 站）" : "一键初始化已发现的站（" + un + "）";
             catchAll.Text = cancelCatch ? "取消补算（还剩 " + qCatch + " 站）" : "补算所有欠天的站（" + owe + "）";
             pauseBtn.Text = st.paused ? "继续" : "暂停";
             info.text = (st.Pending > 0 ? "队列 " + st.Pending + " 个站" + (st.paused ? "（已暂停）" : "") : "队列空") +
