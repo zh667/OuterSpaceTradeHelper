@@ -101,7 +101,10 @@ namespace TradeHelper
                     Finish(id);
                     return;
                 }
+                long t0 = Perf.Now;
                 int done = target.ReleasePendingSettlementBatch(Math.Max(1, cfg.daysPerFrame), Math.Max(1.0, cfg.msPerFrame), false);
+                Perf.settleMsTotal += Perf.Ms(Perf.Now - t0);
+                Perf.settledDays += done;
                 daysDoneTotal += done;
                 currentLeft = PendingOf(target);
                 if (currentLeft == 0)

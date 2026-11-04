@@ -139,6 +139,8 @@ namespace TradeHelper
         public List<TradeIdea> trades = new List<TradeIdea>();
         public List<SellIdea> sells = new List<SellIdea>();
         public long scanMs;
+        public int marketsDone, marketsTotal;
+        public bool complete;
         readonly Dictionary<string, double> routeCache = new Dictionary<string, double>();
 
         // Route distance in AU exactly as the game shows it between galaxies (stargate route through the
@@ -161,6 +163,14 @@ namespace TradeHelper
             Budget.tRoute += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
             routeCache[key] = v;
             return v;
+        }
+
+        // How many of an item the player holds right now (all inventory locations together).
+        public int Owned(string key)
+        {
+            int n = 0;
+            foreach (var l in inventory) { int v; if (l.items.TryGetValue(key, out v)) n += v; }
+            return n;
         }
 
         public string GalaxyName(string id)
@@ -264,8 +274,10 @@ namespace TradeHelper
             yield return null;
 
             var list = new List<KeyValuePair<FWExchangeSpace, MarketInfo>>(EnumerateExchanges(gd));
+            snap.marketsTotal = list.Count;
             foreach (var kv in list)
             {
+                snap.marketsDone++;
                 var m = kv.Value;
                 snap.markets.Add(m);
                 m.fleetAu = snap.RouteAu(snap.fleetGalaxyId, m.galaxyId);
@@ -308,7 +320,35 @@ namespace TradeHelper
                 yield return null;
             }
             snap.scanMs = total.ElapsedMilliseconds;
+            snap.complete = true;
         }
+
+        // Region economics of one goods line in one market: tax rate, market capacity (EPool) and leaning (LStellar).
+        // The game derives them from the galaxy's trade-tag rules; they only move when the market's economic inputs
+        // change, which the game records as a new economic revision. They are cached per market and revision, and every
+        // scan re-reads a random sample live: any difference throws the market's cache away (counted in perf.log).
+        class Econ { public float tax, pool, lean; }
+        class MarketCache { public long revision = long.MinValue; public readonly Dictionary<string, Econ> byGid = new Dictionary<string, Econ>(); }
+        static readonly Dictionary<long, MarketCache> econCache = new Dictionary<long, MarketCache>();
+        static readonly System.Random rng = new System.Random();
+        const int SamplesPerMarket = 8;
+
+        public static void ClearCache() { econCache.Clear(); }
+
+        static Econ ReadEcon(FWExchangeSpace ex, FWExchangeSpaceGoods it, Trade_Goods_Def def, float fallbackTax)
+        {
+            var e = new Econ();
+            long t0 = Perf.Now;
+            try { e.tax = ex.getTaxRate(it.GoodID); } catch { e.tax = fallbackTax; }
+            long t1 = Perf.Now; Budget.tTax += t1 - t0;
+            try { e.pool = ex.getEPool(it.GoodID); } catch { e.pool = def.MarketSize; }
+            long t2 = Perf.Now; Budget.tPool += t2 - t1;
+            try { e.lean = it.getLStellar(); } catch { e.lean = 1f; }
+            Budget.tBase += Perf.Now - t2;
+            return e;
+        }
+
+        static bool Same(Econ a, Econ b) => a.tax == b.tax && a.pool == b.pool && a.lean == b.lean;
 
         static IEnumerator ScanMarket(FWExchangeSpace ex, MarketInfo m, Snapshot snap)
         {
@@ -318,9 +358,42 @@ namespace TradeHelper
             m.tax = SnapshotTax(ex);
             if (!m.initialized) yield break;
             bool exact = m.Exact;
-            float S = 1f;
+            float S = 1f, BG = 0f;
             try { S = ex.getTradeS(); } catch { }
+            try { BG = ex.getBGlobal(); } catch { }
             var items = new List<FWExchangeSpaceGoods>(ex.itemList); // the list belongs to the game: copy
+
+            MarketCache mc;
+            econCache.TryGetValue(ex.uid, out mc);
+            if (exact)
+            {
+                if (mc == null || mc.revision != ex.latestEconomicRevision)
+                {
+                    mc = new MarketCache { revision = ex.latestEconomicRevision };
+                    econCache[ex.uid] = mc;
+                }
+                else if (mc.byGid.Count > 0)
+                {
+                    // Spot-check the cache against live values before trusting it.
+                    for (int k = 0; k < SamplesPerMarket && items.Count > 0; k++)
+                    {
+                        var it = items[rng.Next(items.Count)];
+                        Econ cached;
+                        if (it == null || it.GoodID == null || !mc.byGid.TryGetValue(it.GoodID, out cached)) continue;
+                        var def = it.getGoodsDef();
+                        if (def == null) continue;
+                        Perf.cacheChecks++;
+                        if (!Same(cached, ReadEcon(ex, it, def, m.tax)))
+                        {
+                            Perf.cacheMismatch++;
+                            Debug.Log("[TradeHelper] economics cache mismatch in " + m.name + " (" + it.GoodID + "): cache dropped");
+                            mc.byGid.Clear();
+                            break;
+                        }
+                    }
+                }
+            }
+
             foreach (var it in items)
             {
                 if (Budget.Over)
@@ -331,22 +404,37 @@ namespace TradeHelper
                     if (exact && ex.hasPendingSettlement()) { exact = false; m.pendingDays = ex.pendingSettlementDays.Count; }
                 }
                 if (it == null || string.IsNullOrEmpty(it.GoodID)) continue;
-                long t0 = System.Diagnostics.Stopwatch.GetTimestamp(), t1;
+                long t0 = Perf.Now;
                 Trade_Goods_Def def = null;
                 try { def = it.getGoodsDef(); } catch { }
-                t1 = System.Diagnostics.Stopwatch.GetTimestamp(); Budget.tDef += t1 - t0; t0 = t1;
+                Budget.tDef += Perf.Now - t0;
                 if (def == null) continue;
                 Budget.nGoods++;
                 string cat;
                 snap.gidCategory.TryGetValue(it.GoodID, out cat);
                 var q = new GoodsQuote { market = m, gid = it.GoodID, name = def.Name, category = cat ?? "其他", type = def._type, itemId = def._id, contraband = it.isContraband, exact = exact };
-                try { q.tax = ex.getTaxRate(it.GoodID); } catch { q.tax = m.tax; }
-                t1 = System.Diagnostics.Stopwatch.GetTimestamp(); Budget.tTax += t1 - t0; t0 = t1;
-                try { q.ePool = ex.getEPool(it.GoodID); } catch { q.ePool = def.MarketSize; }
+
+                Econ e = null;
+                if (mc != null && mc.byGid.TryGetValue(it.GoodID, out e)) Perf.cacheHits++;
+                else if (exact)
+                {
+                    e = ReadEcon(ex, it, def, m.tax);
+                    mc.byGid[it.GoodID] = e;
+                    Perf.cacheMisses++;
+                }
+                // A market that owes days keeps the last values read while it was up to date (an estimate).
+                float lean = e != null ? e.lean : 1f;
+                if (e != null) { q.tax = e.tax; q.ePool = e.pool; }
+                else
+                {
+                    try { q.tax = ex.getTaxRate(it.GoodID); } catch { q.tax = m.tax; }
+                    try { q.ePool = ex.getEPool(it.GoodID); } catch { q.ePool = def.MarketSize; }
+                }
                 if (q.ePool <= 0) q.ePool = Math.Max(1, def.MarketSize);
-                t1 = System.Diagnostics.Stopwatch.GetTimestamp(); Budget.tPool += t1 - t0; t0 = t1;
+                long te = Perf.Now;
                 float ev = EventPrice(ex.uid, it.GoodID);
-                t1 = System.Diagnostics.Stopwatch.GetTimestamp(); Budget.tEvent += t1 - t0; t0 = t1;
+                Budget.tEvent += Perf.Now - te;
+
                 var ng = it as FWExchangeSpaceNormalGoods;
                 if (ng != null)
                 {
@@ -356,13 +444,9 @@ namespace TradeHelper
                     q.buyable = ng.show && !ng.isContraband;
                     q.supplyS = S;
                     q.pressure = ng.tradePressure;
-                    q.depth = Math.Min(def.MarketSize / 20.0, def.Production * 2.0);
-                    if (q.exact)
-                    {
-                        try { q.baseFactor = (float)ng.GetBasePriceFactor(true); q.depth = ng.GetTradeDepth(); }
-                        catch { q.exact = false; }
-                    }
-                    if (!q.exact) q.baseFactor = def.Price * ng.PriceNoise * ev;
+                    q.depth = Math.Min(def.MarketSize / 20.0, def.Production * 2.0); // = FWTradePricePressure.Depth
+                    // Same arithmetic as FWExchangeSpaceNormalGoods.GetBasePriceFactor(includeEvent: true).
+                    q.baseFactor = (float)((double)def.Price * (double)lean * Math.Max(0.0, 1.0 + (double)BG) * (double)ng.PriceNoise * (double)ev);
                 }
                 else
                 {
@@ -372,13 +456,12 @@ namespace TradeHelper
                     q.stock = sg.goodsList != null ? sg.goodsList.Count : 0;
                     q.buyable = !sg.isContraband && q.stock > 0;
                     q.minCoef = sg.itemType == 550 ? 0.5f : 0.1f;
-                    if (q.exact)
-                    {
-                        try { q.baseFactor = sg.getPBase() * ev; } catch { q.exact = false; }
-                    }
-                    if (!q.exact) q.baseFactor = Mathf.Round(def.Price * sg.PriceNoise * Mathf.Max(0f, 1f + sg.BLocal)) * ev;
+                    // Same arithmetic as FWExchangeSpaceSpecialGoods.getPBase(), times the event price factor that
+                    // calculatePrice applies.
+                    float num = 1f + Mathf.Max(-1f, sg.BLocal); if (num < 0f) num = 0f;
+                    float num2 = 1f + BG; if (num2 < 0f) num2 = 0f;
+                    q.baseFactor = Mathf.Round(def.Price * lean * num2 * num * sg.PriceNoise) * ev;
                 }
-                Budget.tBase += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
                 q.buy1 = q.BuyUnit(0) * (1 + q.tax);
                 q.sell1 = q.SellUnit(0) * (1 - q.tax);
                 m.goods.Add(q);
@@ -441,6 +524,19 @@ namespace TradeHelper
                 }
             }
             catch (Exception e) { snap.errors.Add("读舰队货仓失败: " + e.Message); }
+            try
+            {
+                // Space station warehouses (things bought into "空间站仓库").
+                if (gd.spaceportList != null)
+                    foreach (var sp in new List<FWSpaceport>(gd.spaceportList))
+                    {
+                        if (sp?.things == null || sp.things.Count == 0) continue;
+                        var loc = new InvLocation { name = snap.GalaxyName(sp.galaxyId) + " 空间站仓库", galaxyId = sp.galaxyId };
+                        AddThings(loc, new List<FWThingBean>(sp.things));
+                        if (loc.items.Count > 0) snap.inventory.Add(loc);
+                    }
+            }
+            catch (Exception e) { snap.errors.Add("读空间站仓库失败: " + e.Message); }
             if (gd.dnaList != null && gd.dnaList.Count > 0)
             {
                 var loc = new InvLocation { name = "DNA 库", galaxyId = snap.fleetGalaxyId };
