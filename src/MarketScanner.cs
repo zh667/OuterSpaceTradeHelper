@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -10,6 +11,7 @@ namespace TradeHelper
         public MarketInfo market;
         public string gid;
         public string name;
+        public string category;
         public int type;
         public string itemId;
         public bool special;
@@ -23,8 +25,9 @@ namespace TradeHelper
         public double depth, pressure;
         public float minCoef;
         public FWExchangeSpaceNormalGoods normal;
+        public double buy1, sell1;    // first unit, tax included (cached at scan time)
 
-        const double Ln4Half = 0.69314718055994530942; // ln(4)/2
+        const double Ln4Half = 0.69314718055994530942; // ln(4)/2, FWTradePricePressure.CurveLog(4, 2)
 
         static double Mult(double p, double d)
         {
@@ -46,20 +49,21 @@ namespace TradeHelper
             return baseFactor * Math.Max(minCoef, store);
         }
 
-        // Price before tax of the i-th unit (0-based) the player buys.
+        // Price before tax of the i-th unit (0-based) the player buys. Special goods follow
+        // FWExchangeSpaceSpecialGoods.calculatePrice: each unit is priced at the occupancy before it moves.
         public double BuyUnit(int i)
         {
             if (special) return SpecialAt(stock - i);
             return NormalAt(stock - i - 0.5, pressure + i + 0.5);
         }
 
-        // Price before tax of the i-th unit (0-based) the player sells.
         public double SellUnit(int i)
         {
             if (special) return SpecialAt(stock + i);
             return NormalAt(stock + i + 0.5, pressure - i - 0.5);
         }
 
+        // Totals: normal goods in an up-to-date market use the game's own quote (exact); otherwise the model above.
         public double BuyCost(int k)
         {
             if (exact && normal != null)
@@ -88,15 +92,14 @@ namespace TradeHelper
         public long uid;
         public string name;
         public string galaxyId;
-        public int galaxyIndex;
         public bool planet;
-        public float x, y;
         public bool initialized;
         public int pendingDays;
         public float tax;
         public FWExchangeSpace ex;
         public List<GoodsQuote> goods = new List<GoodsQuote>();
         public Dictionary<string, GoodsQuote> byGid = new Dictionary<string, GoodsQuote>();
+        public double fleetAu = -1;
         public bool Exact => initialized && pendingDays == 0;
         public string Freshness => !initialized ? "未开过" : pendingDays == 0 ? "实时" : ("欠" + pendingDays + "天");
     }
@@ -114,24 +117,47 @@ namespace TradeHelper
         public long credits;
         public string fleetGalaxyId;
         public List<MarketInfo> markets = new List<MarketInfo>();
-        public Dictionary<string, MarketInfo> marketByGalaxy = new Dictionary<string, MarketInfo>();
-        public Dictionary<string, float[]> galaxyPos = new Dictionary<string, float[]>();
         public Dictionary<string, string> galaxyName = new Dictionary<string, string>();
         public List<InvLocation> inventory = new List<InvLocation>();
         public Dictionary<string, string> itemKeyToGid = new Dictionary<string, string>();
         public Dictionary<string, string> itemNames = new Dictionary<string, string>();
+        public Dictionary<string, string> gidCategory = new Dictionary<string, string>();
         public List<string> errors = new List<string>();
+        public List<TradeIdea> trades = new List<TradeIdea>();
+        public List<SellIdea> sells = new List<SellIdea>();
+        public long scanMs;
+        readonly Dictionary<string, double> routeCache = new Dictionary<string, double>();
 
-        public float Distance(string g1, string g2)
+        // Route distance in AU exactly as the game shows it between galaxies (stargate route through the
+        // galaxy field, GalaxyDistanceUnit.TryCalculateGalaxyFieldRouteToAu). 0 inside one galaxy, -1 unknown.
+        public double RouteAu(string g1, string g2)
         {
-            if (g1 == null || g2 == null) return -1;
-            float[] a, b;
-            if (!galaxyPos.TryGetValue(g1, out a) || !galaxyPos.TryGetValue(g2, out b)) return -1;
-            float dx = a[0] - b[0], dy = a[1] - b[1];
-            return Mathf.Sqrt(dx * dx + dy * dy);
+            if (string.IsNullOrEmpty(g1) || string.IsNullOrEmpty(g2)) return -1;
+            if (g1 == g2) return 0;
+            string key = string.CompareOrdinal(g1, g2) < 0 ? g1 + "|" + g2 : g2 + "|" + g1;
+            double v;
+            if (routeCache.TryGetValue(key, out v)) return v;
+            v = -1;
+            try
+            {
+                double au;
+                if (GalaxyDistanceUnit.TryCalculateGalaxyFieldRouteToAu(g1, g2, out au)) v = au;
+            }
+            catch { }
+            routeCache[key] = v;
+            return v;
+        }
+
+        public string GalaxyName(string id)
+        {
+            if (id == null) return "?";
+            string n;
+            return galaxyName.TryGetValue(id, out n) ? n : id;
         }
     }
 
+    // Builds a Snapshot a little at a time (IEnumerator stepped from Update with a time budget), so opening the
+    // panel never freezes the game. Every number is computed exactly as before; only the work is spread out.
     public static class MarketScanner
     {
         public static FWGameData Game
@@ -173,24 +199,34 @@ namespace TradeHelper
                 string gname;
                 try { gname = g.getName(); } catch { gname = "星系" + g.id; }
                 if (g.exchangeSpace != null)
-                    yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(g.exchangeSpace, new MarketInfo { uid = g.exchangeSpace.uid, name = gname + " 空间站", galaxyId = g.id, galaxyIndex = gi, x = g.posX, y = g.posY });
+                    yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(g.exchangeSpace, new MarketInfo { uid = g.exchangeSpace.uid, name = gname + " 空间站", galaxyId = g.id });
                 if (g.stars == null) continue;
                 foreach (var st in g.stars)
                 {
                     if (st?.exchangeSpace == null) continue;
-                    yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(st.exchangeSpace, new MarketInfo { uid = st.exchangeSpace.uid, name = (st.starName ?? st.starId) + "（星球市场）", galaxyId = g.id, galaxyIndex = gi, planet = true, x = g.posX, y = g.posY });
+                    yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(st.exchangeSpace, new MarketInfo { uid = st.exchangeSpace.uid, name = (st.starName ?? st.starId) + "（星球市场）", galaxyId = g.id, planet = true });
                 }
             }
         }
 
-        public static Snapshot Take()
+        // The game's own first category label (Trade_Goods.TagsDesc), e.g. 材料 / 智慧生物 / 舰载机 / 服装.
+        static string MainCategory(Trade_Goods_Def def)
         {
-            var snap = new Snapshot { takenAt = DateTime.Now };
+            var t = def?.TagsDesc;
+            if (string.IsNullOrEmpty(t)) return "其他";
+            int i = t.IndexOf('|');
+            return i < 0 ? t : t.Substring(0, i);
+        }
+
+        // One step = a small piece of work. The caller keeps stepping until the time budget runs out.
+        public static IEnumerator Scan(Snapshot snap, Config cfg)
+        {
+            var total = System.Diagnostics.Stopwatch.StartNew();
             var gd = Game;
-            if (gd == null) { snap.errors.Add("还没进入存档"); return snap; }
+            snap.takenAt = DateTime.Now;
+            if (gd == null) { snap.errors.Add("还没进入存档"); yield break; }
             snap.credits = gd.creditPoint;
             try { snap.fleetGalaxyId = gd.galaxyBlock?.playerFleet?.pos?.galaxyId; } catch { }
-
             try
             {
                 foreach (var def in ImplDef<Trade_Goods_Def>.beans)
@@ -198,52 +234,94 @@ namespace TradeHelper
                     if (def == null) continue;
                     snap.itemKeyToGid[def._type + "_" + def._id] = def.ID;
                     snap.itemNames[def.ID] = def.Name;
+                    snap.gidCategory[def.ID] = MainCategory(def);
                 }
             }
             catch (Exception e) { snap.errors.Add("读商品表失败: " + e.Message); }
-
             var gals = gd.galaxyBlock?.knownGalaxies;
             if (gals != null)
                 foreach (var g in gals)
                 {
                     if (g == null || g.id == null) continue;
-                    snap.galaxyPos[g.id] = new[] { g.posX, g.posY };
                     try { snap.galaxyName[g.id] = g.getName(); } catch { snap.galaxyName[g.id] = g.id; }
                 }
+            yield return null;
 
-            foreach (var kv in EnumerateExchanges(gd))
+            var list = new List<KeyValuePair<FWExchangeSpace, MarketInfo>>(EnumerateExchanges(gd));
+            foreach (var kv in list)
             {
-                var ex = kv.Key; var m = kv.Value;
-                try { ScanMarket(ex, m, snap); }
-                catch (Exception e) { snap.errors.Add(m.name + ": " + e.Message); }
+                var m = kv.Value;
                 snap.markets.Add(m);
-                if (!m.planet) snap.marketByGalaxy[m.galaxyId] = m;
+                m.fleetAu = snap.RouteAu(snap.fleetGalaxyId, m.galaxyId);
+                IEnumerator inner = null;
+                try { inner = ScanMarket(kv.Key, m, snap); }
+                catch (Exception e) { snap.errors.Add(m.name + ": " + e.Message); }
+                while (inner != null)
+                {
+                    bool more;
+                    try { more = inner.MoveNext(); }
+                    catch (Exception e) { snap.errors.Add(m.name + ": " + e.Message); break; }
+                    if (!more) break;
+                    yield return null;
+                }
+                yield return null;
             }
 
             try { ScanInventory(gd, snap); }
             catch (Exception e) { snap.errors.Add("读库存失败: " + e.Message); }
-            return snap;
+            yield return null;
+
+            var adv = Advisor.Arbitrage(snap, cfg);
+            while (true)
+            {
+                bool more;
+                try { more = adv.MoveNext(); }
+                catch (Exception e) { snap.errors.Add("算跑商建议失败: " + e.Message); break; }
+                if (!more) break;
+                yield return null;
+            }
+            var sel = Advisor.SellOwnStock(snap, cfg);
+            while (true)
+            {
+                bool more;
+                try { more = sel.MoveNext(); }
+                catch (Exception e) { snap.errors.Add("算卖货建议失败: " + e.Message); break; }
+                if (!more) break;
+                yield return null;
+            }
+            snap.scanMs = total.ElapsedMilliseconds;
         }
 
-        static void ScanMarket(FWExchangeSpace ex, MarketInfo m, Snapshot snap)
+        const int GoodsPerStep = 40;
+
+        static IEnumerator ScanMarket(FWExchangeSpace ex, MarketInfo m, Snapshot snap)
         {
             m.ex = ex;
             m.initialized = ex.storeInitialized && ex.itemList != null;
             m.pendingDays = ex.pendingSettlementDays != null ? ex.pendingSettlementDays.Count : 0;
             m.tax = SnapshotTax(ex);
-            if (!m.initialized) return;
+            if (!m.initialized) yield break;
             bool exact = m.Exact;
             float S = 1f;
             try { S = ex.getTradeS(); } catch { }
-            // Iterate over a copy: the list belongs to the game.
-            var items = new List<FWExchangeSpaceGoods>(ex.itemList);
+            var items = new List<FWExchangeSpaceGoods>(ex.itemList); // the list belongs to the game: copy
+            int n = 0;
             foreach (var it in items)
             {
+                if (++n % GoodsPerStep == 0)
+                {
+                    yield return null;
+                    // A new game day may have queued a settlement day while we were paused: from then on this
+                    // market must not be touched by the exact (settling) price functions.
+                    if (exact && ex.hasPendingSettlement()) { exact = false; m.pendingDays = ex.pendingSettlementDays.Count; }
+                }
                 if (it == null || string.IsNullOrEmpty(it.GoodID)) continue;
                 Trade_Goods_Def def = null;
                 try { def = it.getGoodsDef(); } catch { }
                 if (def == null) continue;
-                var q = new GoodsQuote { market = m, gid = it.GoodID, name = def.Name, type = def._type, itemId = def._id, contraband = it.isContraband, exact = exact };
+                string cat;
+                snap.gidCategory.TryGetValue(it.GoodID, out cat);
+                var q = new GoodsQuote { market = m, gid = it.GoodID, name = def.Name, category = cat ?? "其他", type = def._type, itemId = def._id, contraband = it.isContraband, exact = exact };
                 try { q.tax = ex.getTaxRate(it.GoodID); } catch { q.tax = m.tax; }
                 try { q.ePool = ex.getEPool(it.GoodID); } catch { q.ePool = def.MarketSize; }
                 if (q.ePool <= 0) q.ePool = Math.Max(1, def.MarketSize);
@@ -258,7 +336,7 @@ namespace TradeHelper
                     q.supplyS = S;
                     q.pressure = ng.tradePressure;
                     q.depth = Math.Min(def.MarketSize / 20.0, def.Production * 2.0);
-                    if (exact)
+                    if (q.exact)
                     {
                         try { q.baseFactor = (float)ng.GetBasePriceFactor(true); q.depth = ng.GetTradeDepth(); }
                         catch { q.exact = false; }
@@ -273,12 +351,14 @@ namespace TradeHelper
                     q.stock = sg.goodsList != null ? sg.goodsList.Count : 0;
                     q.buyable = !sg.isContraband && q.stock > 0;
                     q.minCoef = sg.itemType == 550 ? 0.5f : 0.1f;
-                    if (exact)
+                    if (q.exact)
                     {
                         try { q.baseFactor = sg.getPBase() * ev; } catch { q.exact = false; }
                     }
                     if (!q.exact) q.baseFactor = Mathf.Round(def.Price * sg.PriceNoise * Mathf.Max(0f, 1f + sg.BLocal)) * ev;
                 }
+                q.buy1 = q.BuyUnit(0) * (1 + q.tax);
+                q.sell1 = q.SellUnit(0) * (1 - q.tax);
                 m.goods.Add(q);
                 m.byGid[q.gid] = q;
             }
@@ -303,8 +383,8 @@ namespace TradeHelper
             try { mother = gd.getMothershipStarMapInfo(); } catch { }
             if (mother != null && mother.starSpread != null)
             {
-                var loc = new InvLocation { name = "母舰" };
-                AddThings(loc, mother.starSpread.things);
+                var loc = new InvLocation { name = "母舰", galaxyId = snap.fleetGalaxyId };
+                AddThings(loc, new List<FWThingBean>(mother.starSpread.things));
                 seen.Add(mother.starMapId);
                 snap.inventory.Add(loc);
             }
@@ -322,7 +402,7 @@ namespace TradeHelper
                             if (map.type != FWStarMapInfo.TYPE_DEPUTY_BASE && map.type != FWStarMapInfo.TYPE_ROOT_BASE) continue;
                             seen.Add(map.starMapId);
                             var loc = new InvLocation { name = (string.IsNullOrEmpty(map.name) ? (st.starName ?? st.starId) : map.name) + "（基地）", galaxyId = g.id };
-                            AddThings(loc, map.starSpread.things);
+                            AddThings(loc, new List<FWThingBean>(map.starSpread.things));
                             snap.inventory.Add(loc);
                         }
                     }
@@ -333,15 +413,16 @@ namespace TradeHelper
                 if (fleet != null)
                 {
                     var loc = new InvLocation { name = (string.IsNullOrEmpty(fleet.name) ? "舰队" : fleet.name) + "（舰队货仓）", galaxyId = fleet.pos?.galaxyId };
-                    AddThings(loc, fleet.getThings());
+                    var things = fleet.getThings();
+                    if (things != null) AddThings(loc, new List<FWThingBean>(things));
                     snap.inventory.Add(loc);
                 }
             }
             catch (Exception e) { snap.errors.Add("读舰队货仓失败: " + e.Message); }
             if (gd.dnaList != null && gd.dnaList.Count > 0)
             {
-                var loc = new InvLocation { name = "DNA 库" };
-                foreach (var d in gd.dnaList)
+                var loc = new InvLocation { name = "DNA 库", galaxyId = snap.fleetGalaxyId };
+                foreach (var d in new List<FWRoleDNA>(gd.dnaList))
                 {
                     if (d == null) continue;
                     var k = "58_" + d.roleId;
