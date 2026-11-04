@@ -8,7 +8,7 @@ namespace TradeHelper
 {
     public class TradeHelperBehaviour : MonoBehaviour
     {
-        public const string Version = "0.4.2";
+        public const string Version = "0.4.3";
         public static TradeHelperBehaviour Instance;
 
         Config cfg;
@@ -91,7 +91,13 @@ namespace TradeHelper
         // A plan was added from a table: re-price plans now and refresh the tables that show "追踪中".
         public void PlansChanged()
         {
-            if (latest != null) { long t = Perf.Now; Plans.Track(latest, cfg, settlement); Perf.Add(Perf.Cat.Plans, t); }
+            // Re-pricing asks the game's price functions: only under the game's locks; otherwise the next scan does it.
+            var gd = MarketScanner.Game;
+            if (latest != null && GameLock.TryEnter(gd))
+            {
+                try { long t = Perf.Now; Plans.Track(latest, cfg, settlement); Perf.Add(Perf.Cat.Plans, t); }
+                finally { GameLock.Exit(gd); }
+            }
             if (window != null) window.RefreshViews();
         }
 
@@ -107,9 +113,11 @@ namespace TradeHelper
             catch (Exception e) { lastStatus = "导出失败: " + e.Message; }
         }
 
-        void PumpJob()
+        // Steps the scan within this frame's budget; returns the snapshot when the scan finished in this frame.
+        Snapshot PumpJob()
         {
-            if (job == null) return;
+            if (job == null) return null;
+            Snapshot done = null;
             jobFrames++;
             // Twice the budget while the panel is open with nothing to show yet.
             float budget = Mathf.Max(1f, cfg.scanMsPerFrame) * (Visible && latest == null ? 2f : 1f);
@@ -147,8 +155,7 @@ namespace TradeHelper
                             Perf.Write("首次打开面板等数据 " + (Time.unscaledTime - openWaitStart).ToString("0.0") + " 秒", cfg);
                             openWaitStart = -1;
                         }
-                        if (window != null) window.OnSnapshot(latest);
-                        if (exportAfterScan) { exportAfterScan = false; DoExport(latest); }
+                        done = latest;
                         break;
                     }
                 }
@@ -160,6 +167,7 @@ namespace TradeHelper
                 Debug.LogWarning("[TradeHelper] scan: " + e);
             }
             Perf.Add(Perf.Cat.Scan, pt);
+            return done;
         }
 
         static string Mb(long b) => (b / 1048576.0).ToString("0.0") + "MB";
@@ -215,13 +223,28 @@ namespace TradeHelper
                 if (themeAt < 0) themeAt = Time.unscaledTime + 5f;
                 else if (themeAt > 0 && Time.unscaledTime >= themeAt) { themeAt = 0; try { Ui.Theme.Load(); } catch (Exception e) { Debug.LogWarning("[TradeHelper] theme: " + e); } }
 
-                long t0 = Perf.Now;
-                settlement.Tick(cfg);
-                Perf.Add(Perf.Cat.Settle, t0);
                 if (refreshAfterSettlement && settlement.Pending == 0 && Visible) { refreshAfterSettlement = false; RequestRefresh(false); }
                 // Read the markets in the background right after a save loads, so the first F8 already has data.
                 if (latest == null && job == null && themeAt == 0) RequestRefresh(false);
-                PumpJob();
+                // Everything that touches game objects runs under the game's locks (see GameLock), tried, never awaited.
+                Snapshot finished = null;
+                if (GameLock.TryEnter(gd))
+                {
+                    try
+                    {
+                        long t0 = Perf.Now;
+                        settlement.Tick(cfg);
+                        Perf.Add(Perf.Cat.Settle, t0);
+                        finished = PumpJob();
+                    }
+                    finally { GameLock.Exit(gd); }
+                }
+                // Panel and export work only with the finished snapshot: outside the locks.
+                if (finished != null)
+                {
+                    if (window != null) window.OnSnapshot(finished);
+                    if (exportAfterScan) { exportAfterScan = false; DoExport(finished); }
+                }
                 if (Visible)
                 {
                     long tu = Perf.Now;
