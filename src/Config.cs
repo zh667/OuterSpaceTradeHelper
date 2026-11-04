@@ -29,7 +29,8 @@ namespace TradeHelper
         public float minProfit = 0;
         public bool goodsBuyableOnly = false;
         public bool hideContraband = true;
-        // Galaxies the player has not discovered are not on the map; leave them out of advice unless asked.
+        // Galaxies the fleet has not been to (not discovered, or only discovered on the map): left out of advice and of the
+        // plans' best markets unless asked. (Name kept so existing config files keep the setting.)
         public bool includeUndiscovered = false;
         // Planet ground markets (地面交易行) in route advice. Off: the fleet cannot trade there.
         public bool includeGround = false;

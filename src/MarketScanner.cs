@@ -195,8 +195,13 @@ namespace TradeHelper
         public Dictionary<string, GoodsQuote> byGid = new Dictionary<string, GoodsQuote>();
         public double fleetAu = -1;
         public long fingerprint;     // hash of everything the quotes were built from (see Fingerprint)
-        public int observe;          // galaxy exploration state: 0 = not discovered (not on the player's map), 1 = observed, 2 = explored
+        // Galaxy exploration state (FWGalaxy.observaState, kept by GalaxyExplorationService): 0 = not discovered (not on
+        // the player's map), 1 = discovered (on the map, the fleet has not been there), 2 = explored (the fleet has been there).
+        public int observe;
         public bool Discovered => observe >= 1;
+        public bool Explored => observe >= 2;
+        // Suffix for names of markets the player has not been to.
+        public string NotVisitedTag => Explored ? "" : Discovered ? "（未探索）" : "（未发现）";
         public bool Exact => initialized && pendingDays == 0;
         public string Freshness => !initialized ? "未开过" : pendingDays == 0 ? "实时" : ("欠" + pendingDays + "天");
     }
@@ -656,7 +661,10 @@ namespace TradeHelper
                     foreach (var kv2 in loc.items) ih = Mix(ih, (long)kv2.Key.GetHashCode() * 31 + kv2.Value);
                 snap.inventoryHash = ih;
             }
-            snap.adviceKey = cfg.maxStaleDays + "|" + cfg.includeUndiscovered + "|" + cfg.includeGround + "|" + Plans.version;
+            long explored = 17;
+            unchecked { foreach (var m in snap.markets) explored = Mix(explored, m.uid * 3 + m.observe); }
+            // Exploring a galaxy changes which markets advice may use, though no station's numbers change.
+            snap.adviceKey = cfg.maxStaleDays + "|" + cfg.includeUndiscovered + "|" + cfg.includeGround + "|" + Plans.version + "|" + explored;
             if (prev != null && prev.complete && snap.marketsReused == snap.markets.Count && prev.markets.Count == snap.markets.Count &&
                 prev.inventoryHash == snap.inventoryHash && prev.adviceKey == snap.adviceKey)
             {
