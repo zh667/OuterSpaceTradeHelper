@@ -92,6 +92,25 @@ namespace TradeHelper
             result.perf["firstScanWaitSeconds"] = Math.Round(Time.realtimeSinceStartup - ts, 1);
             result.perf["firstScan"] = Perf.LastScan;
 
+            if (req.tests == "settle-many" || req.tests == "keepfresh")
+            {
+                yield return Guard(req.tests == "settle-many" ? ManyDaysCatchUp() : KeepAllFresh(), req.tests);
+                Finish(null);
+                yield break;
+            }
+            if (req.tests == "settle")
+            {
+                // Only the catch-up measurement: wait for the game's own day change so markets owe days.
+                yield return Guard(CatchUpSmoothness(true), "catch-up smoothness");
+                host.SetVisible(true);
+                yield return new WaitForSecondsRealtime(3);
+                host.ShowTab(5);
+                yield return new WaitForSecondsRealtime(2);
+                yield return Shot("settlement");
+                Finish(null);
+                yield break;
+            }
+
             // Prices are compared on up-to-date markets. If the save has few, bring the closest ones up to date with the
             // mod's own background catch-up (the same work as opening their exchanges).
             int exact = host.Latest.markets.FindAll(m => m.Exact && !m.planet).Count;
@@ -120,6 +139,7 @@ namespace TradeHelper
             Run(() => StationPlaces());
 
             if (req.tests == "all" || req.tests.Contains("trade")) yield return Guard(TradeTest(), "real trade: buy, plan stages, sell");
+            yield return Guard(CatchUpSmoothness(false), "catch-up smoothness");
 
             // A full scan from scratch, then a refresh with nothing changed.
             yield return TimedScan("fullScan", true);
@@ -190,6 +210,119 @@ namespace TradeHelper
                 }
                 yield return cur;
             }
+        }
+
+        // Background catch-up of markets that owe days: frame times while the mod's settlement queue works.
+        IEnumerator CatchUpSmoothness(bool waitForDay)
+        {
+            var c = new Check { name = "catch-up smoothness", info = true, passed = true };
+            result.checks.Add(c);
+            Predicate<MarketInfo> owes = m => m.initialized && !m.Exact && !m.planet && m.Discovered;
+            float tw = Time.realtimeSinceStartup;
+            // A loaded save starts paused: run the game clock fast until a day change, then back to normal speed.
+            if (waitForDay && host.Latest.markets.FindAll(owes).Count < 10) MapManager.setLogicSpeed(20f);
+            while (waitForDay && host.Latest.markets.FindAll(owes).Count < 10 && Time.realtimeSinceStartup - tw < 1200)
+            {
+                yield return new WaitForSecondsRealtime(10);
+                yield return Refresh();
+            }
+            if (waitForDay)
+            {
+                MapManager.setLogicSpeed(1f);
+                yield return new WaitForSecondsRealtime(5);
+                yield return Refresh();
+                c.details.Add("waited " + (Time.realtimeSinceStartup - tw).ToString("0") + " s for markets to owe days (clock x20), measured at x1");
+            }
+            var stale = host.Latest.markets.FindAll(owes);
+            stale.Sort((a, b) => b.pendingDays.CompareTo(a.pendingDays));
+            int n = Math.Min(20, stale.Count), days = 0;
+            if (n == 0) { c.summary = "no market owes days"; yield break; }
+            for (int i = 0; i < n; i++) { host.settlement.Enqueue(stale[i].uid); days += stale[i].pendingDays; }
+            yield return null;
+            int frames = 0, over50 = 0, over100 = 0, gcs = GC.CollectionCount(0); double sum = 0, worst = 0;
+            float t0 = Time.realtimeSinceStartup;
+            while (host.settlement.Pending > 0 && Time.realtimeSinceStartup - t0 < 600)
+            {
+                yield return null;
+                double dt = Time.unscaledDeltaTime * 1000.0;
+                frames++; sum += dt; if (dt > worst) worst = dt;
+                if (dt > 50) over50++;
+                if (dt > 100) over100++;
+            }
+            float secs = Time.realtimeSinceStartup - t0;
+            c.summary = n + " markets, " + days + " days in " + secs.ToString("0.0") + " s; " + frames + " frames, average " + (sum / Math.Max(1, frames)).ToString("0.0") + " ms, worst " + worst.ToString("0") + " ms, " + over50 + " frames over 50 ms, " + over100 + " over 100 ms, " + (GC.CollectionCount(0) - gcs) + " garbage collections; left " + host.settlement.Pending;
+            result.perf["catchUpSmoothness"] = c.summary;
+            yield return Refresh();
+            int stillOwing = 0;
+            foreach (var m0 in stale.GetRange(0, n)) { var m = host.Latest.markets.Find(x => x.uid == m0.uid); if (m != null && !m.Exact) stillOwing++; }
+            c.details.Add(stillOwing + " of them still owe days after the catch-up");
+        }
+
+        // Frame statistics over a stretch of frames.
+        class Frames
+        {
+            public int n, over50, over100, over250; public double sum, worst; int gc0 = GC.CollectionCount(0); float t0 = Time.realtimeSinceStartup;
+            public void Add(double ms) { n++; sum += ms; if (ms > worst) worst = ms; if (ms > 50) over50++; if (ms > 100) over100++; if (ms > 250) over250++; }
+            public string Text() => (Time.realtimeSinceStartup - t0).ToString("0.0") + " s, " + n + " frames, average " + (sum / Math.Max(1, n)).ToString("0.0") + " ms, worst " + worst.ToString("0") + " ms, over 50 ms: " + over50 + ", over 100 ms: " + over100 + ", over 250 ms: " + over250 + ", garbage collections " + (GC.CollectionCount(0) - gc0);
+        }
+
+        // Scenario B: every market owes many days (the clock runs fast with nothing settled), then all are caught up.
+        IEnumerator ManyDaysCatchUp()
+        {
+            var c = new Check { name = "settle-many", info = true, passed = true };
+            result.checks.Add(c);
+            MapManager.setLogicSpeed(100f);
+            float tw = Time.realtimeSinceStartup;
+            yield return new WaitForSecondsRealtime(240);
+            MapManager.setLogicSpeed(1f);
+            yield return new WaitForSecondsRealtime(5);
+            yield return Refresh();
+            var owe = host.Latest.markets.FindAll(m => m.initialized && !m.planet && m.pendingDays > 0);
+            int days = 0, most = 0; foreach (var m in owe) { days += m.pendingDays; if (m.pendingDays > most) most = m.pendingDays; }
+            c.details.Add("clock x100 for 240 s: " + owe.Count + " markets owe " + days + " days (most " + most + ")");
+            var idle = new Frames();
+            for (float t = Time.realtimeSinceStartup; Time.realtimeSinceStartup - t < 20;) { yield return null; idle.Add(Time.unscaledDeltaTime * 1000.0); }
+            c.details.Add("idle at x1 before: " + idle.Text());
+            foreach (var m in owe) host.settlement.Enqueue(m.uid);
+            var f = new Frames();
+            float tc = Time.realtimeSinceStartup;
+            while (host.settlement.Pending > 0 && Time.realtimeSinceStartup - tc < 1500) { yield return null; f.Add(Time.unscaledDeltaTime * 1000.0); }
+            c.details.Add("catching up all: " + f.Text() + "; left " + host.settlement.Pending);
+            c.summary = owe.Count + " markets, " + days + " days: " + f.Text();
+            result.perf["settleMany"] = c.summary;
+        }
+
+        // Scenario C: every market kept up to date at normal speed; the mod catches each one up after every day change.
+        IEnumerator KeepAllFresh()
+        {
+            var c = new Check { name = "keepfresh", info = true, passed = true };
+            result.checks.Add(c);
+            var cfg = host.Cfg;
+            foreach (var m in host.Latest.markets) if (!m.planet && m.initialized && !cfg.keepFresh.Contains(m.uid)) cfg.keepFresh.Add(m.uid);
+            cfg.Save();
+            c.details.Add(cfg.keepFresh.Count + " markets kept up to date");
+            // Bring them all up to date first.
+            foreach (var uid in cfg.keepFresh) host.settlement.Enqueue(uid);
+            float tc = Time.realtimeSinceStartup;
+            while (host.settlement.Pending > 0 && Time.realtimeSinceStartup - tc < 900) yield return null;
+            c.details.Add("first catch-up done in " + (Time.realtimeSinceStartup - tc).ToString("0") + " s");
+            // Then play at x3 (the game's fastest button) for 8 minutes and watch the frames.
+            MapManager.setLogicSpeed(3f);
+            var all = new Frames(); var busy = new Frames();
+            int startDays = host.settlement.daysDoneTotal;
+            for (float t = Time.realtimeSinceStartup; Time.realtimeSinceStartup - t < 480;)
+            {
+                yield return null;
+                double ms = Time.unscaledDeltaTime * 1000.0;
+                all.Add(ms);
+                if (host.settlement.Pending > 0 || host.settlement.currentUid >= 0) busy.Add(ms);
+            }
+            MapManager.setLogicSpeed(1f);
+            c.details.Add("8 min at x3: " + all.Text());
+            c.details.Add("frames while catching up: " + busy.Text());
+            c.details.Add("days settled meanwhile: " + (host.settlement.daysDoneTotal - startDays));
+            c.summary = "x3 for 8 min, " + cfg.keepFresh.Count + " markets kept fresh: " + all.Text();
+            result.perf["keepFresh"] = c.summary;
         }
 
         IEnumerator Refresh()
