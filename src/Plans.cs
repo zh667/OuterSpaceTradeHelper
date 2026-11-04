@@ -36,6 +36,11 @@ namespace TradeHelper
         public string fromLocation;             // plans from held stock: where the stock is (e.g. 灾厄舰队（舰队货仓）)
         public bool autoBought;                 // the purchase was seen in the inventory (not marked by hand)
         public string boughtAt;
+        public long boughtMM = -1;              // game clock when the goods were in hand (sales after it count)
+        public int soldQty;                     // units of this plan that have left the inventory since
+        public double soldRevenue;              // estimate for those units at the time they left (actual when known)
+        public bool autoDone;                   // completed automatically
+        public string doneAt, doneNote;
 
         // Live values (not saved).
         [JsonIgnore] [NonSerialized] public double curCost = double.NaN, curRevenue = double.NaN;
@@ -49,19 +54,32 @@ namespace TradeHelper
         [JsonIgnore] [NonSerialized] public DateTime lastPointAt = DateTime.MinValue;
 
         [JsonIgnore] public double PlanProfit => planRevenue - planCost;
-        [JsonIgnore] public double CurProfit => state == 0 ? curRevenue - curCost : curRevenue - planCost;
-        [JsonIgnore] public int HoldQty => state == 0 ? qty : Math.Max(1, boughtQty);
-        // Stage of the plan. Stage 1 means "goods in hand, still to sell".
-        [JsonIgnore] public string StateText => state == 0 ? "① 待买入" : state == 1 ? "② 已买 " + boughtQty + "，待卖" : "③ 已完成";
+        [JsonIgnore] public double CurProfit => state == 0 ? curRevenue - curCost
+                                               : state == 1 ? (HoldQty > 0 ? curRevenue : 0) + soldRevenue - planCost
+                                               : soldRevenue - planCost;
+        // Units still to buy (stage 1) or still in hand to sell (stage 2).
+        [JsonIgnore] public int HoldQty => state == 0 ? qty : Math.Max(0, boughtQty - soldQty);
+        [JsonIgnore] public int ShownQty => state == 2 ? boughtQty : HoldQty;
+        [JsonIgnore] public string StateText => state == 0 ? "① 待买入"
+                                              : state == 1 ? (soldQty > 0 ? "② 已卖 " + soldQty + "/" + boughtQty : "② 已买 " + boughtQty + "，待卖")
+                                              : (autoDone ? "③ 已完成·自动" : "③ 已完成");
     }
 
     // plans.json. Written with the game's Newtonsoft.Json: Unity's JsonUtility silently wrote "{}" for this file (0.3.0 and
     // earlier), so plans did not survive a restart.
-    public class PlanFile { public int format = 2; public List<Plan> plans = new List<Plan>(); }
+    public class PlanFile
+    {
+        public int format = 2;
+        public List<Plan> plans = new List<Plan>();
+        public Dictionary<string, int> lastOwned = new Dictionary<string, int>();
+    }
 
     public static class Plans
     {
         public static List<Plan> list = new List<Plan>();
+        // How many of each tracked goods the player held at the last look; changes are handed to plans (see Track).
+        static Dictionary<string, int> lastOwned = new Dictionary<string, int>();
+        static object baselineGame;
         // Bumped whenever the set of plans or a plan's stage changes (advice depends on it; history points do not).
         public static int version;
         static string Path => System.IO.Path.Combine(Config.Dir, "plans.json");
@@ -76,6 +94,7 @@ namespace TradeHelper
                 {
                     var f = JsonConvert.DeserializeObject<PlanFile>(File.ReadAllText(Path));
                     if (f?.plans != null) list = f.plans;
+                    if (f?.lastOwned != null) lastOwned = f.lastOwned;
                 }
             }
             catch (Exception e) { Debug.LogWarning("[TradeHelper] plans read failed: " + e.Message); }
@@ -91,7 +110,7 @@ namespace TradeHelper
             try
             {
                 Directory.CreateDirectory(Config.Dir);
-                var json = JsonConvert.SerializeObject(new PlanFile { plans = list }, Formatting.Indented);
+                var json = JsonConvert.SerializeObject(new PlanFile { plans = list, lastOwned = lastOwned }, Formatting.Indented);
                 var tmp = Path + ".tmp";
                 File.WriteAllText(tmp, json);
                 File.Copy(tmp, Path, true);
@@ -148,6 +167,7 @@ namespace TradeHelper
                 createdAt = DateTime.Now.ToString("MM-dd HH:mm"), createdMM = GameMM(),
                 planCost = t.cost, planRevenue = t.revenue, ownedAtStart = snap.Owned(key), state = 0,
             };
+            lastOwned[key] = snap.Owned(key);
             list.Add(p);
             version++;
             ApplyKeepFresh(p, cfg, st);
@@ -163,7 +183,9 @@ namespace TradeHelper
                 sellUid = s.market.market.uid, sellName = s.market.market.name, sellGalaxy = s.market.market.galaxyId,
 buyName = "（持有·" + s.location + "）", fromLocation = s.location, createdAt = DateTime.Now.ToString("MM-dd HH:mm"), createdMM = GameMM(),
                 planCost = 0, planRevenue = s.revenue, ownedAtStart = snap.Owned(s.key), state = 1, boughtQty = s.qty,
+                boughtMM = GameMM(),
             };
+            lastOwned[s.key] = snap.Owned(s.key);
             list.Add(p);
             version++;
             ApplyKeepFresh(p, cfg, st);
@@ -186,6 +208,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
             version++;
             p.autoBought = false;
             p.boughtAt = DateTime.Now.ToString("MM-dd HH:mm");
+            p.boughtMM = GameMM();
             if (p.boughtQty <= 0) p.boughtQty = p.qty;
             ReleaseBuySide(p, cfg);
             Save();
@@ -193,11 +216,49 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
 
         public static void MarkDone(Plan p, Config cfg)
         {
+            p.autoDone = false;
+            p.doneAt = DateTime.Now.ToString("MM-dd HH:mm");
+            p.doneNote = "手动标记";
+            if (p.soldQty < p.boughtQty)
+            {
+                // The rest is taken as sold at the current estimate.
+                if (!double.IsNaN(p.curRevenue)) p.soldRevenue += p.curRevenue;
+                p.soldQty = p.boughtQty;
+            }
             p.state = 2;
             version++;
             ReleaseKeepFresh(p, cfg);
             cfg.Save();
             Save();
+        }
+
+        // Undo an automatic completion (e.g. the goods were moved somewhere this panel does not see).
+        public static void Reopen(Plan p, Config cfg, Settlement st)
+        {
+            p.state = 1;
+            p.soldQty = 0; p.soldRevenue = 0;
+            p.autoDone = false; p.doneAt = null; p.doneNote = null;
+            version++;
+            ApplyKeepFresh(p, cfg, st);
+            Save();
+        }
+
+        // Player sales of this goods at a market since the given game time, from the market's own trade records (the game
+        // keeps the latest 16 per goods line, in memory only): units and what the player was paid.
+        static void PlayerSales(MarketInfo m, string gid, long sinceMM, out int units, out double paid)
+        {
+            units = 0; paid = 0;
+            GoodsQuote q;
+            if (m == null || gid == null || !m.byGid.TryGetValue(gid, out q)) return;
+            FWExchangeSpaceGoods g = (FWExchangeSpaceGoods)q.normal ?? q.specialGoods;
+            var hs = g?.transactionHistories;
+            if (hs == null) return;
+            foreach (var h in new List<FWExchangeSpaceTransactionHistory>(hs))
+            {
+                if (h == null || h.source != 0 || h.direction != -1 || h.transactionMM < sinceMM) continue;
+                units += Math.Max(1, Math.Abs(h.sum));
+                paid += h.actualPayment;
+            }
         }
 
         static void ReleaseBuySide(Plan p, Config cfg)
@@ -212,6 +273,102 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
         static long GameMM()
         {
             try { return MarketScanner.Game?.elapsedMM ?? 0; } catch { return 0; }
+        }
+
+        // Stage changes from the inventory. For each goods with open plans, the change in the player's total holding since
+        // the last look is handed out in queue order: a rise fills plans waiting to buy (stage 1 -> 2), a fall counts as
+        // sold for plans holding goods (stage 2 -> 3 once all their units are gone). Which station took them is read from
+        // the markets' trade records.
+        static bool FollowInventory(Snapshot snap, Config cfg, List<Plan> order)
+        {
+            bool changed = false;
+            var keys = new HashSet<string>();
+            foreach (var p in order) if (p.state != 2 && p.key != null) keys.Add(p.key);
+            // A partly read inventory would look like a sale: change nothing.
+            if (snap.inventory.Count == 0 || snap.errors.Exists(e => e.StartsWith("读舰队货仓失败") || e.StartsWith("读空间站仓库失败"))) return false;
+            // After loading a save (or starting the game) the holding is whatever that save has: take it as the new baseline.
+            var game = MarketScanner.Game;
+            if (!ReferenceEquals(game, baselineGame))
+            {
+                baselineGame = game;
+                foreach (var key in keys) lastOwned[key] = snap.Owned(key);
+                return true;
+            }
+            foreach (var key in keys)
+            {
+                int now = snap.Owned(key), prev;
+                if (!lastOwned.TryGetValue(key, out prev)) { lastOwned[key] = now; changed = true; continue; }
+                int d = now - prev;
+                if (d == 0) continue;
+                lastOwned[key] = now; changed = true;
+                if (d > 0)
+                {
+                    foreach (var p in order)
+                    {
+                        if (d <= 0) break;
+                        if (p.key != key || p.buyUid < 0) continue;
+                        if (p.state == 0)
+                        {
+                            int take = Math.Min(d, p.qty);
+                            p.state = 1; p.boughtQty = take; p.autoBought = true;
+                            p.boughtAt = DateTime.Now.ToString("MM-dd HH:mm"); p.boughtMM = GameMM();
+                            ReleaseBuySide(p, cfg);
+                            d -= take; version++;
+                        }
+                        else if (p.state == 1 && p.autoBought && p.soldQty == 0 && p.boughtQty < p.qty)
+                        {
+                            int take = Math.Min(d, p.qty - p.boughtQty);
+                            p.boughtQty += take; d -= take; version++;
+                        }
+                    }
+                }
+                else
+                {
+                    int n = -d;
+                    foreach (var p in order)
+                    {
+                        if (n <= 0) break;
+                        if (p.key != key || p.state != 1) continue;
+                        int left = p.boughtQty - p.soldQty;
+                        if (left <= 0) continue;
+                        int take = Math.Min(n, left);
+                        // Value the units at the last estimate for what this plan still held.
+                        if (!double.IsNaN(p.curRevenue) && left > 0) p.soldRevenue += p.curRevenue * take / left;
+                        p.soldQty += take; n -= take; version++;
+                        if (p.soldQty >= p.boughtQty) Complete(p, snap, cfg);
+                    }
+                }
+            }
+            foreach (var k in new List<string>(lastOwned.Keys)) if (!keys.Contains(k)) { lastOwned.Remove(k); changed = true; }
+            return changed;
+        }
+
+        static void Complete(Plan p, Snapshot snap, Config cfg)
+        {
+            p.state = 2;
+            p.autoDone = true;
+            p.doneAt = DateTime.Now.ToString("MM-dd HH:mm");
+            long since = p.boughtMM >= 0 ? p.boughtMM : p.createdMM;
+            int units; double paid;
+            PlayerSales(snap.markets.Find(m => m.uid == p.sellUid), p.gid, since, out units, out paid);
+            if (units > 0)
+            {
+                p.doneNote = "在计划的 " + p.sellName + " 卖出";
+                // The records cover the whole sale only when they hold exactly this plan's units (the game keeps 16).
+                if (units == p.boughtQty && paid > 0) { p.soldRevenue = paid; p.doneNote += "，实际到手按游戏成交记录"; }
+            }
+            else
+            {
+                string where = null;
+                foreach (var m in snap.markets)
+                {
+                    PlayerSales(m, p.gid, since, out units, out paid);
+                    if (units > 0) { where = m.name; break; }
+                }
+                p.doneNote = where != null ? "在 " + where + " 卖出（不是计划的站）" : "库存里这批货没了，没找到卖出记录（可能挪到了别处）";
+            }
+            ReleaseKeepFresh(p, cfg);
+            cfg.Save();
         }
 
         // Re-price every open plan against a fresh snapshot.
@@ -236,6 +393,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
             var sellTotal = new Dictionary<string, int>();
             foreach (var o in list)
                 if (o.state != 2) { var k = o.sellUid + "|" + o.gid; int v; sellTotal.TryGetValue(k, out v); sellTotal[k] = v + o.HoldQty; }
+            changed |= FollowInventory(snap, cfg, order);
             foreach (var p in order)
             {
                 p.note = "";
@@ -249,33 +407,6 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                 GoodsQuote bq = null, sq = null;
                 if (p.buyMarket != null) p.buyMarket.byGid.TryGetValue(p.gid, out bq);
                 if (p.sellMarket != null) p.sellMarket.byGid.TryGetValue(p.gid, out sq);
-
-                // The baseline for spotting the purchase is the lowest holding seen while waiting to buy: if the player
-                // sells some of the same goods first, buying afterwards must still count in full.
-                if (p.state == 0 && p.owned < p.ownedAtStart) { p.ownedAtStart = p.owned; changed = true; }
-                // Detect the purchase from the inventory: the holding grew since the plan was made.
-                if (p.state == 0 && p.owned - p.ownedAtStart >= 1)
-                {
-                    p.state = 1;
-                    version++;
-                    p.boughtQty = Math.Min(p.qty, p.owned - p.ownedAtStart);
-                    p.autoBought = true;
-                    p.boughtAt = DateTime.Now.ToString("MM-dd HH:mm");
-                    ReleaseBuySide(p, cfg);
-                    changed = true;
-                }
-                else if (p.state == 1 && p.buyUid >= 0 && p.autoBought && p.boughtQty < p.qty && p.owned - p.ownedAtStart > p.boughtQty)
-                {
-                    // Bought in more than one go: follow the holding up to the planned quantity.
-                    p.boughtQty = Math.Min(p.qty, p.owned - p.ownedAtStart);
-                    version++;
-                    changed = true;
-                }
-                else if (p.state == 1 && p.buyUid >= 0 && p.owned <= p.ownedAtStart)
-                {
-                    // Holding back to where it was: sold (or moved somewhere this panel does not see).
-                    p.note = "库存里已经看不到这批货：卖掉了的话点“改为已完成”";
-                }
 
                 int hold = p.HoldQty;
                 if (p.state == 0)

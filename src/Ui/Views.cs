@@ -547,7 +547,7 @@ namespace TradeHelper.Ui
 
         public PlansView(Window w, RectTransform body, Config cfg, TradeHelperBehaviour host) : base(w, body, cfg, host)
         {
-            Kit.TxtAt(root, "状态：① 待买入 →（库存多出这批货时自动）② 已买，待卖 →（卖掉后点「改为已完成」）③ 已完成；「手动改状态」是按钮。* = 同站同货还有别的计划，已按排队后被压低的价格算", 0, 0, w.BodyW, 24, 14, Theme.Text2);
+            Kit.TxtAt(root, "状态会自动改：库存里多出这批货 → ② 已买，待卖；这批货全部从库存里没了 → ③ 已完成（按卖出站的成交记录写明在哪卖的）。「手动改状态」是按钮，可纠正。* = 同站同货还有别的计划，已按排队后被压低的价格算", 0, 0, w.BodyW, 24, 14, Theme.Text2);
             Drop("显示：", 0, 30, 230, new List<string> { "进行中", "全部", "已完成" }, 0, i => { show = i; table.Resort(); });
             Kit.Button(root, "删除所有已完成", 238, 30, 230, 32, () =>
             {
@@ -557,7 +557,7 @@ namespace TradeHelper.Ui
             var cols = new List<Column<Plan>>
             {
                 new Column<Plan> { title = "商品", width = 130, text = p => p.name, key = p => p.name },
-                new Column<Plan> { title = "数量", width = 56, text = p => p.HoldQty.ToString(), key = p => p.HoldQty, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<Plan> { title = "数量", width = 56, text = p => p.ShownQty.ToString(), key = p => p.ShownQty, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<Plan> { title = "状态", width = 128, text = p => p.StateText, key = p => p.state, numeric = true, color = p => p.state == 0 ? Theme.Accent : p.state == 1 ? Theme.Good : Theme.Text2 },
                 new Column<Plan> { title = "在哪买", width = 176, text = p => Station(p.buyName, p.buyMarket), key = p => p.buyName, color = p => p.buyMarket != null ? Fmt.FreshColor(p.buyMarket) : Theme.Text2 },
                 new Column<Plan> { title = "去哪卖", width = 176, text = p => Station(p.sellName, p.sellMarket), key = p => p.sellName, color = p => p.sellMarket != null ? Fmt.FreshColor(p.sellMarket) : Theme.Text2 },
@@ -567,8 +567,8 @@ namespace TradeHelper.Ui
                 new Column<Plan> { title = "现在最好卖到", width = 176, text = p => p.alternatives.Count > 0 ? p.alternatives[0].Key.name : "?", key = p => p.alternatives.Count > 0 ? p.alternatives[0].Key.name : null },
                 new Column<Plan> { title = "舰队→下一站", width = 104, text = p => Fmt.Dist(p.fleetToNextAu), key = p => p.fleetToNextAu < 0 ? (IComparable)null : p.fleetToNextAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<Plan> { title = "两站实时", width = 92, checkGet = p => p.keepFresh, checkSet = (p, v) => { p.keepFresh = v; Plans.ApplyKeepFresh(p, cfg, host.settlement); Plans.Save(); } },
-                new Column<Plan> { title = "手动改状态", width = 110, buttonText = p => p.state == 0 ? "改为已买入" : p.state == 1 ? "改为已完成" : "—", buttonEnabled = p => p.state != 2,
-                    onButton = p => { if (p.state == 0) Plans.MarkBought(p, cfg, host.settlement); else if (p.state == 1) Plans.MarkDone(p, cfg); Refresh(); } },
+                new Column<Plan> { title = "手动改状态", width = 110, buttonText = p => p.state == 0 ? "改为已买入" : p.state == 1 ? "改为已完成" : "改回已买入",
+                    onButton = p => { if (p.state == 0) Plans.MarkBought(p, cfg, host.settlement); else if (p.state == 1) Plans.MarkDone(p, cfg); else Plans.Reopen(p, cfg, host.settlement); Refresh(); } },
                 new Column<Plan> { title = "", width = 70, buttonText = _ => "删除", onButton = p => { Plans.Remove(p, cfg); if (selected == p) selected = null; Refresh(); } },
             };
             table = new Table<Plan>(root, 0, 70, w.BodyW, w.BodyH - 70 - 190, cols, 2, false);
@@ -591,7 +591,7 @@ namespace TradeHelper.Ui
             var p = selected;
             if (p == null || !Plans.list.Contains(p)) { detail.text = "<color=#A4A5A6>点一行看这个计划的细节：计划时和现在的价格、利润变化记录、现在卖到哪最好。</color>"; return; }
             var sb = new System.Text.StringBuilder();
-            sb.Append("<b>").Append(p.name).Append(" × ").Append(p.HoldQty).Append("</b>   ").Append(p.StateText).Append("   计划于 ").Append(p.createdAt).Append('\n');
+            sb.Append("<b>").Append(p.name).Append(" × ").Append(p.ShownQty).Append("</b>   ").Append(p.StateText).Append("   计划于 ").Append(p.createdAt).Append('\n');
             sb.Append("计划时：成本 ").Append(Fmt.Money(p.planCost)).Append("  到手 ").Append(Fmt.Money(p.planRevenue)).Append("  净赚 ").Append(Fmt.Money(p.PlanProfit)).Append('\n');
             sb.Append("现在：").Append(p.state == 0 ? "成本 " + (double.IsNaN(p.curCost) ? "?" : Fmt.Money(p.curCost)) + "  " : "成本按计划 ").Append("到手 ")
               .Append(double.IsNaN(p.curRevenue) ? "?" : Fmt.Money(p.curRevenue)).Append("  净赚 ").Append(double.IsNaN(p.CurProfit) ? "?" : Fmt.Money(p.CurProfit))
@@ -602,7 +602,12 @@ namespace TradeHelper.Ui
             if (p.sellMarket != null && !string.IsNullOrEmpty(p.sellMarket.where)) sb.Append("卖出站怎么去：").Append(p.sellMarket.where).Append('\n');
             if (p.state >= 1 && p.buyUid >= 0)
                 sb.Append(p.autoBought ? "已在库存里看到 " + p.boughtQty + " 个（" + p.boughtAt + " 自动识别为已买入）" : "已买入（" + (p.boughtAt ?? "") + " 手动标记）")
-                  .Append("，下一步：到 ").Append(p.sellName).Append(" 卖出\n");
+                  .Append(p.state == 1 ? "，下一步：到 " + p.sellName + " 卖出" : "").Append('\n');
+            if (p.state == 1 && p.soldQty > 0)
+                sb.Append("库存里已少了 ").Append(p.soldQty).Append("/").Append(p.boughtQty).Append(" 个（按卖出算，约到手 ").Append(Fmt.Money(p.soldRevenue)).Append("），全部没了会自动完成\n");
+            if (p.state == 2)
+                sb.Append("<color=#A4A5A6>").Append(p.autoDone ? "自动完成" : "完成").Append("于 ").Append(p.doneAt ?? "?").Append("：").Append(p.doneNote ?? "")
+                  .Append("。到手约 ").Append(Fmt.Money(p.soldRevenue)).Append("，净赚约 ").Append(Fmt.Money(p.soldRevenue - p.planCost)).Append(p.autoDone ? "。判断错了可点「改回已买入」" : "").Append("</color>\n");
             if (p.sellAhead > 0 || p.buyAhead > 0)
                 sb.Append("<color=#D8982F>同站同货有别的计划排在前面：").Append(p.sellAhead > 0 ? "卖出站先有 " + p.sellAhead + " 个要卖，" : "").Append(p.buyAhead > 0 ? "买入站先有 " + p.buyAhead + " 个要买，" : "")
                   .Append("这里的价格已按被它们压过之后算（顺序：已买/持有的先，再按加入先后）</color>\n");
