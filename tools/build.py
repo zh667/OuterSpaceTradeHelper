@@ -23,11 +23,17 @@ shutil.copy2(dll, os.path.join(dist, "v_common", "Assemblies", "TradeHelper.dll"
 h = hashlib.sha256(open(dll, "rb").read()).hexdigest()
 print("dll", os.path.getsize(dll), h)
 if "install" in args:
+    # Replace only the mod's own files (Manifest, v_common); anything else in the folder, such as the
+    # player's data folder, is left alone.
     target = os.path.join(GAME, "mods", "TradeHelper")
-    if os.path.isdir(target):
-        bak = os.path.join(ROOT, "dist", "replaced-" + time.strftime("%Y%m%d-%H%M%S"))
-        shutil.copytree(target, bak)
-        shutil.rmtree(target)
+    os.makedirs(target, exist_ok=True)
+    bak = os.path.join(ROOT, "dist", "replaced-" + time.strftime("%Y%m%d-%H%M%S"))
+    for part in ("Manifest", "v_common"):
+        cur = os.path.join(target, part)
+        if os.path.isdir(cur):
+            shutil.copytree(cur, os.path.join(bak, part))
+            shutil.rmtree(cur)
+        shutil.copytree(os.path.join(dist, part), cur)
+    if os.path.isdir(bak):
         print("previous install backed up to", bak)
-    shutil.copytree(dist, target)
-    print("installed to", target)
+    print("installed to", target, "kept:", sorted(set(os.listdir(target)) - {"Manifest", "v_common"}))

@@ -77,6 +77,7 @@ namespace TradeHelper
             catch (Exception e) { Debug.LogWarning("[TradeHelper] config read failed: " + e.Message); }
             if (c == null) c = new Config();
             if (c.keepFresh == null) c.keepFresh = new List<long>();
+            if (c.dataDirMode == 2 && string.IsNullOrEmpty(c.dataDirCustom)) c.dataDirMode = 0; // custom chosen but never filled in
             c.path = p;
             return c;
         }
