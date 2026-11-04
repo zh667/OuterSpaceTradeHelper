@@ -27,6 +27,7 @@ namespace TradeHelper
         public float minCoef;
         public FWExchangeSpaceNormalGoods normal;
         public FWExchangeSpaceSpecialGoods specialGoods;
+        public float eventFactor = 1f; // galaxy event price factor used for this quote (FWGalaxyEventTradeEffects)
         public double occupancy;      // special: store occupancy = sum of the items' durability factors (getStoreOccupancy)
         public double buy1, sell1;    // first unit, tax included (cached at scan time)
 
@@ -176,8 +177,6 @@ namespace TradeHelper
         public string starId;
         public FWStarInfo star;      // planet market: its planet
         public string where = "";    // where in the game this market is opened
-        public string place = "";    // galaxy market: its trade stations and where they are (e.g. 索拉驿站（塞拉遗迹旁）)
-        public string placeShort = "";   // e.g. 塞拉遗迹旁 / 星系中
         public string groundBase;    // planet market: the player's base on that planet, if any
         public bool initialized;
         public int pendingDays;
@@ -341,13 +340,6 @@ namespace TradeHelper
             return st.starName ?? st.starId;
         }
 
-        // A planet's fixed place in its galaxy (FWStarInfo.getPos: radius r at angle getRadian(), set when the galaxy is made).
-        public static Vector2 PlanetPos(FWStarInfo st)
-        {
-            float deg = st.getRadian();
-            return new Vector2(Mathf.Cos(Mathf.PI / 180f * deg) * st.r, Mathf.Sin(Mathf.PI / 180f * deg) * st.r);
-        }
-
         // Stations whose menu has the trade button (PageInGalaxySpace.setPlatfrom: a trade centre in the station's
         // definition, or a story facility that StoryFacilityRules.CanTrade allows).
         public static bool HasTradeButton(FWGameData gd, FWSpaceport sp)
@@ -362,37 +354,16 @@ namespace TradeHelper
             catch { return false; }
         }
 
-        public class StationPlace
-        {
-            public string name;
-            public string planet;      // nearest planet's map name
-            public float distance;     // to that planet
-            public float planetR;      // that planet's orbit radius
-            public Vector2 pos;
-            // Beside a planet: the named stations sit 4-5 map units from their planet, the plain ones 15 or more
-            // (measured over the 64 trade stations of the test save).
-            public const float BesideDistance = 8f;
-            public bool Beside => planet != null && distance <= BesideDistance;
-            public string Label => name + (Beside ? "（" + planet + "旁）" : "（星系中）");
-        }
+        public class StationPlace { public string name; }
 
+        // Stations of a galaxy whose menu opens its market. Stations are not tied to planets; only the galaxy and the
+        // station's own name tell the player where to go.
         public static List<StationPlace> TradeStations(FWGameData gd, FWGalaxy g)
         {
             var res = new List<StationPlace>();
             if (gd?.spaceportList == null || g == null) return res;
             foreach (var sp in new List<FWSpaceport>(gd.spaceportList))
-            {
-                if (sp == null || sp.galaxyId != g.id || !HasTradeButton(gd, sp)) continue;
-                var place = new StationPlace { name = SpName(sp), pos = sp.getPosition(), distance = float.MaxValue };
-                if (g.stars != null)
-                    foreach (var st in g.stars)
-                    {
-                        if (st == null) continue;
-                        float d = Vector2.Distance(PlanetPos(st), place.pos);
-                        if (d < place.distance) { place.distance = d; place.planet = PlanetName(st); place.planetR = st.r; }
-                    }
-                res.Add(place);
-            }
+                if (sp != null && sp.galaxyId == g.id && HasTradeButton(gd, sp)) res.Add(new StationPlace { name = SpName(sp) });
             return res;
         }
 
@@ -445,18 +416,14 @@ namespace TradeHelper
                 string gname = snap.GalaxyName(m.galaxyId);
                 if (snap.stationPlaces.TryGetValue(m.galaxyId ?? "", out l) && l.Count > 0)
                 {
-                    var names = new List<string>(); var labels = new List<string>();
-                    foreach (var p in l) { names.Add(p.name); labels.Add(p.Label); }
+                    var names = new List<string>();
+                    foreach (var p in l) if (!names.Contains(p.name)) names.Add(p.name);
                     m.name = gname + "·" + string.Join("/", names.Count > 2 ? names.GetRange(0, 2) : names) + (names.Count > 2 ? "等" : "");
-                    m.place = string.Join("、", labels);
-                    m.placeShort = l[0].Beside ? l[0].planet + "旁" : "星系中";
-                    m.where = "在 " + gname + " 星系：" + m.place + "，点「贸易市场」";
+                    m.where = "在 " + gname + " 星系的 " + string.Join("、", names) + " 点「贸易市场」";
                 }
                 else
                 {
                     m.name = gname + "·贸易市场";
-                    m.place = "没有能交易的空间站";
-                    m.placeShort = "无交易站";
                     m.where = gname + " 星系现在没有能打开贸易市场的空间站";
                 }
             }
@@ -962,6 +929,7 @@ namespace TradeHelper
                 if (q.ePool <= 0) q.ePool = Math.Max(1, def.MarketSize);
                 long te = Perf.Now;
                 float ev = EventPrice(ex.uid, it.GoodID);
+                q.eventFactor = ev;
                 Budget.tEvent += Perf.Now - te;
 
                 var ng = it as FWExchangeSpaceNormalGoods;

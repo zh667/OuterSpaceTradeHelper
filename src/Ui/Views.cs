@@ -156,11 +156,10 @@ namespace TradeHelper.Ui
 
         public MarketsView(Window w, RectTransform body, Config cfg, TradeHelperBehaviour host) : base(w, body, cfg, host)
         {
-            const float LW = 620;
+            const float LW = 500;
             var mcols = new List<Column<MarketInfo>>
             {
                 new Column<MarketInfo> { title = "星系·空间站", width = 220, text = m => m.name + (m.Discovered ? "" : "（未发现）"), key = m => m.name, color = m => m.Discovered ? Theme.Text : Theme.Text2 },
-                new Column<MarketInfo> { title = "位置", width = 120, text = m => m.planet ? "地面" : m.placeShort, key = m => m.placeShort, color = _ => Theme.Text2 },
                 new Column<MarketInfo> { title = "数据", width = 78, text = m => m.Freshness, key = m => m.initialized ? m.pendingDays : 100000, numeric = true, color = Fmt.FreshColor },
                 new Column<MarketInfo> { title = "税", width = 56, text = m => (m.tax * 100).ToString("0") + "%", key = m => m.tax, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<MarketInfo> { title = "距舰队", width = 130, text = m => Fmt.Dist(m.fleetAu), key = m => m.fleetAu < 0 ? (IComparable)null : m.fleetAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
