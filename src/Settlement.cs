@@ -5,22 +5,32 @@ using UnityEngine;
 namespace TradeHelper
 {
     // Background market catch-up for the stations the player picked. Uses the game's own bounded entry point
-    // FWExchangeSpace.ReleasePendingSettlementBatch (same work as opening the station's exchange, but a few
-    // days per frame instead of all at once).
+    // FWExchangeSpace.ReleasePendingSettlementBatch: the same work as opening the station's exchange, spread over
+    // frames. A never-opened market builds its store inside the first settled day (FWExchangeSpace.settleNextDay
+    // calls initializeStore); one that owes no days is initialised with GetItemsForUse, like opening it.
     public class Settlement
     {
         readonly Queue<long> queue = new Queue<long>();
         readonly HashSet<long> queued = new HashSet<long>();
         public string lastError;
-        public int daysDoneTotal;
+        public int daysDoneTotal, marketsDone;
+        public long currentUid = -1;
+        public int currentLeft;
         float nextKeepCheck;
+        public bool paused;
 
         public int Pending => queue.Count;
         public bool IsQueued(long uid) => queued.Contains(uid);
+        public event Action<long> MarketFinished;
 
         public void Enqueue(long uid)
         {
             if (queued.Add(uid)) queue.Enqueue(uid);
+        }
+
+        public void Clear()
+        {
+            queue.Clear(); queued.Clear(); currentUid = -1; currentLeft = 0;
         }
 
         static FWExchangeSpace Find(FWGameData gd, long uid)
@@ -30,10 +40,15 @@ namespace TradeHelper
             return null;
         }
 
+        static int PendingOf(FWExchangeSpace ex)
+        {
+            try { return ex.pendingSettlementDays != null ? ex.pendingSettlementDays.Count : 0; } catch { return 0; }
+        }
+
         public void Tick(Config cfg)
         {
             var gd = MarketScanner.Game;
-            if (gd == null) return;
+            if (gd == null) { if (queue.Count > 0) Clear(); return; }
             if (Time.unscaledTime >= nextKeepCheck)
             {
                 nextKeepCheck = Time.unscaledTime + 5f;
@@ -41,26 +56,38 @@ namespace TradeHelper
                     foreach (var kv in MarketScanner.EnumerateExchanges(gd))
                     {
                         var ex = kv.Key;
-                        if (!cfg.keepFresh.Contains(ex.uid) || !ex.storeInitialized) continue;
+                        if (!cfg.keepFresh.Contains(ex.uid)) continue;
                         bool pending = false;
                         try { pending = ex.hasPendingSettlement(); } catch { }
-                        if (pending) Enqueue(ex.uid);
+                        if (pending || !ex.storeInitialized) Enqueue(ex.uid);
                     }
             }
-            if (queue.Count == 0) return;
+            if (paused || queue.Count == 0) return;
             long id = queue.Peek();
             var target = Find(gd, id);
-            if (target == null || !target.storeInitialized) { Drop(); return; }
+            if (target == null) { Drop(); return; }
+            currentUid = id;
             try
             {
-                bool pending = target.hasPendingSettlement();
-                if (!pending) { Drop(); return; }
+                int left = PendingOf(target);
+                currentLeft = left;
+                if (left == 0)
+                {
+                    if (!target.storeInitialized) target.GetItemsForUse(); // nothing owed: build the store like opening it
+                    Finish(id);
+                    return;
+                }
                 int done = target.ReleasePendingSettlementBatch(Math.Max(1, cfg.daysPerFrame), Math.Max(1.0, cfg.msPerFrame), false);
                 daysDoneTotal += done;
-                if (!target.hasPendingSettlement()) Drop();
+                currentLeft = PendingOf(target);
+                if (currentLeft == 0)
+                {
+                    if (!target.storeInitialized) target.GetItemsForUse();
+                    Finish(id);
+                }
                 else if (done == 0)
                 {
-                    // Nothing progressed this frame (e.g. the world clock is mid-advance); move it to the back.
+                    // No progress this frame (e.g. the world clock is mid-advance): move it to the back.
                     queue.Dequeue(); queue.Enqueue(id);
                 }
             }
@@ -72,10 +99,18 @@ namespace TradeHelper
             }
         }
 
+        void Finish(long id)
+        {
+            marketsDone++;
+            Drop();
+            try { MarketFinished?.Invoke(id); } catch { }
+        }
+
         void Drop()
         {
             if (queue.Count == 0) return;
             queued.Remove(queue.Dequeue());
+            currentUid = -1; currentLeft = 0;
         }
     }
 }
