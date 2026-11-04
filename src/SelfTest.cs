@@ -262,7 +262,14 @@ namespace TradeHelper
         class Frames
         {
             public int n, over50, over100, over250; public double sum, worst; int gc0 = GC.CollectionCount(0); float t0 = Time.realtimeSinceStartup;
-            public void Add(double ms) { n++; sum += ms; if (ms > worst) worst = ms; if (ms > 50) over50++; if (ms > 100) over100++; if (ms > 250) over250++; }
+            public long allocated; long lastMem = GC.GetTotalMemory(false); int lastGc = GC.CollectionCount(0);
+            public void Add(double ms)
+            {
+                n++; sum += ms; if (ms > worst) worst = ms; if (ms > 50) over50++; if (ms > 100) over100++; if (ms > 250) over250++;
+                long mem = GC.GetTotalMemory(false); int g = GC.CollectionCount(0);
+                if (g == lastGc && mem > lastMem) allocated += mem - lastMem;
+                lastMem = mem; lastGc = g;
+            }
             public string Text() => (Time.realtimeSinceStartup - t0).ToString("0.0") + " s, " + n + " frames, average " + (sum / Math.Max(1, n)).ToString("0.0") + " ms, worst " + worst.ToString("0") + " ms, over 50 ms: " + over50 + ", over 100 ms: " + over100 + ", over 250 ms: " + over250 + ", garbage collections " + (GC.CollectionCount(0) - gc0);
         }
 
@@ -284,10 +291,15 @@ namespace TradeHelper
             for (float t = Time.realtimeSinceStartup; Time.realtimeSinceStartup - t < 20;) { yield return null; idle.Add(Time.unscaledDeltaTime * 1000.0); }
             c.details.Add("idle at x1 before: " + idle.Text());
             foreach (var m in owe) host.settlement.Enqueue(m.uid);
+            long mod0 = Perf.ModAllocatedTotal;
             var f = new Frames();
             float tc = Time.realtimeSinceStartup;
             while (host.settlement.Pending > 0 && Time.realtimeSinceStartup - tc < 1500) { yield return null; f.Add(Time.unscaledDeltaTime * 1000.0); }
             c.details.Add("catching up all: " + f.Text() + "; left " + host.settlement.Pending);
+            long modAlloc = Perf.ModAllocatedTotal - mod0;
+            c.details.Add("garbage collector: incremental=" + UnityEngine.Scripting.GarbageCollector.isIncremental + ", mode=" + UnityEngine.Scripting.GarbageCollector.GCMode
+                          + ", heap " + (GC.GetTotalMemory(false) / 1048576) + " MB");
+            c.details.Add("allocated during the catch-up: " + (f.allocated / 1048576.0).ToString("0") + " MB in total (" + (f.allocated / 1048576.0 / Math.Max(1, days)).ToString("0.0") + " MB per market-day), of which the mod's own main-thread code " + (modAlloc / 1048576.0).ToString("0") + " MB");
             c.summary = owe.Count + " markets, " + days + " days: " + f.Text();
             result.perf["settleMany"] = c.summary;
         }
