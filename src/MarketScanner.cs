@@ -113,6 +113,7 @@ namespace TradeHelper
         public List<GoodsQuote> goods = new List<GoodsQuote>();
         public Dictionary<string, GoodsQuote> byGid = new Dictionary<string, GoodsQuote>();
         public double fleetAu = -1;
+        public long fingerprint;     // hash of everything the quotes were built from (see Fingerprint)
         public int observe;          // galaxy exploration state: 0 = not discovered (not on the player's map), 1 = observed, 2 = explored
         public bool Discovered => observe >= 1;
         public bool Exact => initialized && pendingDays == 0;
@@ -141,8 +142,13 @@ namespace TradeHelper
         public List<TradeIdea> trades = new List<TradeIdea>();
         public List<SellIdea> sells = new List<SellIdea>();
         public long scanMs;
-        public int marketsDone, marketsTotal;
-        public bool complete;
+        public int marketsDone, marketsTotal, marketsReused;
+        public bool complete, adviceReused;
+        public string phase = "";
+        public double maxStepMs;
+        public string maxStepPhase = "";
+        public long inventoryHash;
+        public string adviceKey;
         readonly Dictionary<string, double> routeCache = new Dictionary<string, double>();
 
         // Route distance in AU exactly as the game shows it between galaxies (stargate route through the
@@ -245,6 +251,85 @@ namespace TradeHelper
             return i < 0 ? t : t.Substring(0, i);
         }
 
+        // Last completed snapshot: stations whose fingerprint did not change are carried over from it unchanged.
+        public static Snapshot lastComplete;
+
+        static long Mix(long h, long v) { unchecked { return (h ^ v) * 1099511628211L; } }
+        static long Mix(long h, double v) => Mix(h, BitConverter.DoubleToInt64Bits(v));
+
+        // Hash of every input the quotes of one station are computed from: owed days, economic revision, trade
+        // sensitivity, global pressure, the event rules active right now, and per goods line its stock, trade
+        // pressure, price noise, local supply, showcase and contraband flags. Same hash = same numbers.
+        static long Fingerprint(FWExchangeSpace ex)
+        {
+            long h = unchecked((long)14695981039346656037UL);
+            h = Mix(h, (long)(ex.pendingSettlementDays != null ? ex.pendingSettlementDays.Count : 0));
+            h = Mix(h, ex.storeInitialized ? 1L : 0L);
+            h = Mix(h, ex.latestEconomicRevision);
+            try { h = Mix(h, (double)ex.getTradeS()); h = Mix(h, (double)ex.getBGlobal()); } catch { }
+            try
+            {
+                var gd = Game;
+                var ev = FWGalaxyEventTradeEffects.CaptureInputs(ex.uid, gd != null ? gd.elapsedMM : 0);
+                if (ev?.rules != null)
+                    foreach (var r in ev.rules)
+                    {
+                        if (r == null) continue;
+                        h = Mix(h, (long)(r.effectId ?? "").GetHashCode());
+                        h = Mix(h, (long)(r.requireGoodsIds ?? "").GetHashCode());
+                        h = Mix(h, (long)(r.requireTags ?? "").GetHashCode());
+                        h = Mix(h, (double)r.price);
+                    }
+            }
+            catch { h = Mix(h, -7L); }
+            var items = ex.itemList;
+            if (items == null) return h;
+            for (int i = 0; i < items.Count; i++)
+            {
+                var it = items[i];
+                if (it == null) continue;
+                h = Mix(h, (double)it.PriceNoise);
+                h = Mix(h, (double)it.BLocal);
+                h = Mix(h, it.isContraband ? 3L : 5L);
+                var ng = it as FWExchangeSpaceNormalGoods;
+                if (ng != null)
+                {
+                    h = Mix(h, (long)(ng.thing != null ? ng.thing.sum : -1));
+                    h = Mix(h, ng.tradePressure);
+                    h = Mix(h, ng.show ? 11L : 13L);
+                }
+                else
+                {
+                    var sg = it as FWExchangeSpaceSpecialGoods;
+                    if (sg != null) h = Mix(h, (long)(sg.goodsList != null ? sg.goodsList.Count : -1));
+                }
+            }
+            return h;
+        }
+
+        // The economics cache spot check, also run on stations that are carried over.
+        static bool SpotCheck(FWExchangeSpace ex, MarketInfo m, MarketCache mc, List<FWExchangeSpaceGoods> items)
+        {
+            if (mc == null || mc.byGid.Count == 0 || items == null || items.Count == 0) return true;
+            for (int k = 0; k < SamplesPerMarket; k++)
+            {
+                var it = items[rng.Next(items.Count)];
+                Econ cached;
+                if (it == null || it.GoodID == null || !mc.byGid.TryGetValue(it.GoodID, out cached)) continue;
+                var def = it.getGoodsDef();
+                if (def == null) continue;
+                Perf.cacheChecks++;
+                if (!Same(cached, ReadEcon(ex, it, def, m.tax)))
+                {
+                    Perf.cacheMismatch++;
+                    Debug.Log("[TradeHelper] economics cache mismatch in " + m.name + " (" + it.GoodID + "): cache dropped");
+                    mc.byGid.Clear();
+                    return false;
+                }
+            }
+            return true;
+        }
+
         // One step = a small piece of work. The caller keeps stepping until the time budget runs out.
         public static IEnumerator Scan(Snapshot snap, Config cfg)
         {
@@ -277,10 +362,34 @@ namespace TradeHelper
 
             var list = new List<KeyValuePair<FWExchangeSpace, MarketInfo>>(EnumerateExchanges(gd));
             snap.marketsTotal = list.Count;
+            var prev = lastComplete;
+            var prevByUid = new Dictionary<long, MarketInfo>();
+            if (prev != null) foreach (var pm in prev.markets) prevByUid[pm.uid] = pm;
             foreach (var kv in list)
             {
                 snap.marketsDone++;
                 var m = kv.Value;
+                snap.phase = "读站 " + m.name;
+                long fp = 0;
+                try { fp = Fingerprint(kv.Key); } catch { fp = 0; }
+                MarketInfo old;
+                if (fp != 0 && prevByUid.TryGetValue(m.uid, out old) && old.fingerprint == fp && old.ex == kv.Key)
+                {
+                    MarketCache omc;
+                    econCache.TryGetValue(m.uid, out omc);
+                    bool ok = !old.Exact || SpotCheck(kv.Key, old, omc, kv.Key.itemList != null ? new List<FWExchangeSpaceGoods>(kv.Key.itemList) : null);
+                    if (ok)
+                    {
+                        // Nothing this station's numbers depend on has changed: keep its quotes.
+                        old.name = m.name; old.observe = m.observe;
+                        old.fleetAu = snap.RouteAu(snap.fleetGalaxyId, old.galaxyId);
+                        snap.markets.Add(old);
+                        snap.marketsReused++;
+                        if (Budget.Over) yield return null;
+                        continue;
+                    }
+                }
+                m.fingerprint = fp;
                 snap.markets.Add(m);
                 m.fleetAu = snap.RouteAu(snap.fleetGalaxyId, m.galaxyId);
                 IEnumerator inner = null;
@@ -297,12 +406,35 @@ namespace TradeHelper
                 yield return null;
             }
 
+            snap.phase = "读库存";
             long ti = System.Diagnostics.Stopwatch.GetTimestamp();
             try { ScanInventory(gd, snap); }
             catch (Exception e) { snap.errors.Add("读库存失败: " + e.Message); }
             Budget.tInventory += System.Diagnostics.Stopwatch.GetTimestamp() - ti;
             yield return null;
 
+            unchecked
+            {
+                long ih = 17;
+                foreach (var loc in snap.inventory)
+                    foreach (var kv2 in loc.items) ih = Mix(ih, (long)kv2.Key.GetHashCode() * 31 + kv2.Value);
+                snap.inventoryHash = ih;
+            }
+            snap.adviceKey = cfg.maxStaleDays + "|" + cfg.includeUndiscovered + "|" + Plans.version;
+            if (prev != null && prev.complete && snap.marketsReused == snap.markets.Count && prev.markets.Count == snap.markets.Count &&
+                prev.inventoryHash == snap.inventoryHash && prev.adviceKey == snap.adviceKey)
+            {
+                // Same stations, same holdings, same settings: the advice is the same; only distances to the fleet moved.
+                snap.trades = prev.trades; snap.sells = prev.sells;
+                foreach (var t in snap.trades) t.fleetAu = t.buy.market.fleetAu;
+                foreach (var t in snap.sells) t.fleetAu = t.market.market.fleetAu;
+                snap.adviceReused = true;
+                snap.scanMs = total.ElapsedMilliseconds;
+                snap.complete = true;
+                lastComplete = snap;
+                yield break;
+            }
+            snap.phase = "算跑商建议";
             var adv = Advisor.Arbitrage(snap, cfg);
             while (true)
             {
@@ -312,6 +444,7 @@ namespace TradeHelper
                 if (!more) break;
                 yield return null;
             }
+            snap.phase = "算卖货建议";
             var sel = Advisor.SellOwnStock(snap, cfg);
             while (true)
             {
@@ -323,6 +456,7 @@ namespace TradeHelper
             }
             snap.scanMs = total.ElapsedMilliseconds;
             snap.complete = true;
+            lastComplete = snap;
         }
 
         // Region economics of one goods line in one market: tax rate, market capacity (EPool) and leaning (LStellar).
@@ -335,7 +469,7 @@ namespace TradeHelper
         static readonly System.Random rng = new System.Random();
         const int SamplesPerMarket = 8;
 
-        public static void ClearCache() { econCache.Clear(); }
+        public static void ClearCache() { econCache.Clear(); lastComplete = null; }
 
         static Econ ReadEcon(FWExchangeSpace ex, FWExchangeSpaceGoods it, Trade_Goods_Def def, float fallbackTax)
         {

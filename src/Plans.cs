@@ -40,6 +40,7 @@ namespace TradeHelper
         [NonSerialized] public List<KeyValuePair<MarketInfo, double>> alternatives = new List<KeyValuePair<MarketInfo, double>>();
         [NonSerialized] public double fleetToNextAu = -1;
         [NonSerialized] public string note = "";
+        [NonSerialized] public DateTime lastPointAt = DateTime.MinValue;
 
         public double PlanProfit => planRevenue - planCost;
         public double CurProfit => state == 0 ? curRevenue - curCost : curRevenue - planCost;
@@ -53,6 +54,8 @@ namespace TradeHelper
     public static class Plans
     {
         public static List<Plan> list = new List<Plan>();
+        // Bumped whenever the set of plans or a plan's stage changes (advice depends on it; history points do not).
+        public static int version;
         static string Path => System.IO.Path.Combine(Config.Dir, "plans.json");
         const int HistoryMax = 60;
 
@@ -125,6 +128,7 @@ namespace TradeHelper
                 planCost = t.cost, planRevenue = t.revenue, ownedAtStart = snap.Owned(key), state = 0,
             };
             list.Add(p);
+            version++;
             ApplyKeepFresh(p, cfg, st);
             Save();
             return p;
@@ -140,6 +144,7 @@ namespace TradeHelper
                 planCost = 0, planRevenue = s.revenue, ownedAtStart = snap.Owned(s.key), state = 1, boughtQty = s.qty,
             };
             list.Add(p);
+            version++;
             ApplyKeepFresh(p, cfg, st);
             Save();
             return p;
@@ -149,6 +154,7 @@ namespace TradeHelper
         {
             ReleaseKeepFresh(p, cfg);
             list.Remove(p);
+            version++;
             cfg.Save();
             Save();
         }
@@ -156,6 +162,7 @@ namespace TradeHelper
         public static void MarkBought(Plan p, Config cfg, Settlement st)
         {
             p.state = 1;
+            version++;
             if (p.boughtQty <= 0) p.boughtQty = p.qty;
             ReleaseBuySide(p, cfg);
             Save();
@@ -164,6 +171,7 @@ namespace TradeHelper
         public static void MarkDone(Plan p, Config cfg)
         {
             p.state = 2;
+            version++;
             ReleaseKeepFresh(p, cfg);
             cfg.Save();
             Save();
@@ -201,6 +209,7 @@ namespace TradeHelper
                 if (p.state == 0 && p.owned - p.ownedAtStart >= 1)
                 {
                     p.state = 1;
+                    version++;
                     p.boughtQty = Math.Min(p.qty, p.owned - p.ownedAtStart);
                     ReleaseBuySide(p, cfg);
                     changed = true;
@@ -251,9 +260,12 @@ namespace TradeHelper
                         buyPending = p.buyMarket != null ? p.buyMarket.pendingDays : -1, sellPending = p.sellMarket != null ? p.sellMarket.pendingDays : -1,
                     };
                     var last = p.history.Count > 0 ? p.history[p.history.Count - 1] : null;
-                    if (last == null || Math.Abs(last.profit - pt.profit) > 0.5 || last.gameMM != pt.gameMM)
+                    // A new point when the profit moved, or at least every five minutes.
+                    bool moved = last == null || Math.Abs(last.profit - pt.profit) > Math.Max(1.0, Math.Abs(last.profit) * 0.001);
+                    if (moved || (DateTime.Now - p.lastPointAt).TotalMinutes >= 5)
                     {
                         p.history.Add(pt);
+                        p.lastPointAt = DateTime.Now;
                         if (p.history.Count > HistoryMax) p.history.RemoveRange(0, p.history.Count - HistoryMax);
                         changed = true;
                     }

@@ -8,7 +8,7 @@ namespace TradeHelper
 {
     public class TradeHelperBehaviour : MonoBehaviour
     {
-        public const string Version = "0.3.0";
+        public const string Version = "0.3.1";
         public static TradeHelperBehaviour Instance;
 
         Config cfg;
@@ -114,12 +114,17 @@ namespace TradeHelper
             {
                 while (!Budget.Over)
                 {
-                    if (!job.MoveNext())
+                    long ts = Perf.Now;
+                    bool more = job.MoveNext();
+                    double stepMs = Perf.Ms(Perf.Now - ts);
+                    if (building != null && stepMs > building.maxStepMs) { building.maxStepMs = stepMs; building.maxStepPhase = building.phase; }
+                    if (!more)
                     {
                         job = null;
                         latest = building; building = null;
                         var line = "扫描完成 " + DateTime.Now.ToString("HH:mm:ss") + "：" + latest.markets.Count + " 站, " + latest.trades.Count + " 条跑商, " + latest.sells.Count + " 条卖货, 用时 " +
-                                   latest.scanMs + "ms 分 " + jobFrames + " 帧（每帧上限 " + budget.ToString("0") + "ms）; " + Budget.Report();
+                                   latest.scanMs + "ms 分 " + jobFrames + " 帧（每帧上限 " + budget.ToString("0") + "ms）, 沿用未变的站 " + latest.marketsReused + "/" + latest.markets.Count +
+                                   (latest.adviceReused ? ", 建议沿用" : ", 建议重算") + ", 最长一步 " + latest.maxStepMs.ToString("0.0") + "ms（" + latest.maxStepPhase + "）; " + Budget.Report();
                         Perf.LastScan = line;
                         Perf.Write(line, cfg);
                         Debug.Log("[TradeHelper] " + line);

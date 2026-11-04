@@ -17,6 +17,7 @@ namespace TradeHelper
         static int frames;
         static double frameSumMs, frameMaxMs, modFrameMaxMs;
         static float windowStart = -1;
+        static int gc0Start = -1, gcMaxStart = -1;
         public static string LastSummary = "";
         public static string LastScan = "";
         public static int settledDays;
@@ -44,7 +45,7 @@ namespace TradeHelper
             double dt = Time.unscaledDeltaTime * 1000.0;
             frameSumMs += dt; if (dt > frameMaxMs) frameMaxMs = dt;
             frames++;
-            if (windowStart < 0) windowStart = Time.unscaledTime;
+            if (windowStart < 0) { windowStart = Time.unscaledTime; gc0Start = GC.CollectionCount(0); gcMaxStart = GC.CollectionCount(GC.MaxGeneration); }
             if (Time.unscaledTime - windowStart >= 30f) Flush(cfg);
         }
 
@@ -64,6 +65,9 @@ namespace TradeHelper
                 sb.Append(" | ").Append(names[i]).Append(" 平均 ").Append((sumMs[i] / frames).ToString("0.00")).Append(" 最多 ").Append(maxMs[i].ToString("0.0"));
             sb.Append(" | 补算 ").Append(settledDays).Append(" 天 共 ").Append(settleMsTotal.ToString("0")).Append("ms");
             sb.Append(" | 缓存 命中 ").Append(cacheHits).Append(" 未命中 ").Append(cacheMisses).Append(" 抽查 ").Append(cacheChecks).Append(" 不一致 ").Append(cacheMismatch);
+            int g0 = GC.CollectionCount(0), gm = GC.CollectionCount(GC.MaxGeneration);
+            sb.Append(" | 垃圾回收 ").Append(gc0Start < 0 ? 0 : g0 - gc0Start).Append(" 次（完整 ").Append(gcMaxStart < 0 ? 0 : gm - gcMaxStart).Append(" 次）");
+            gc0Start = g0; gcMaxStart = gm;
             sb.Append(" | 内存 ").Append((GC.GetTotalMemory(false) / 1048576.0).ToString("0")).Append("MB");
             LastSummary = sb.ToString();
             Write(LastSummary, cfg);
