@@ -311,6 +311,12 @@ namespace TradeHelper
             c.summary = (c.passed ? "all steps match" : "some steps differ") + " (" + qb.name + " " + qb.market.name + " -> " + qs.market.name + ")";
         }
 
+        // A galaxy event window (e.g. regional inflation x1.15) may open or close between the scan and the check.
+        static bool EventChanged(GoodsQuote q)
+        {
+            try { return FWGalaxyEventTradeEffects.Get(q.market.ex.uid, q.gid).Price != q.eventFactor; } catch { return false; }
+        }
+
         static double Rel(double a, double b) => Math.Abs(a - b) / Math.Max(1.0, Math.Max(Math.Abs(a), Math.Abs(b)));
 
         // The checkout's tax: PageTradeInventory.GetCurrentTaxRate().
@@ -336,7 +342,7 @@ namespace TradeHelper
         Check CheckNormal(Snapshot snap)
         {
             var c = new Check { name = "normal goods = game quote" };
-            int n = 0, bad = 0; double worst = 0;
+            int n = 0, bad = 0, evSkip = 0; double worst = 0;
             int[] ks = { 1, 10, 100 };
             foreach (var m in snap.markets)
             {
@@ -344,6 +350,7 @@ namespace TradeHelper
                 foreach (var q in m.goods)
                 {
                     if (q.normal == null || q.special) continue;
+                    if (EventChanged(q)) { evSkip++; continue; }
                     foreach (int k in ks)
                     {
                         if (q.buyable && q.stock >= k)
@@ -361,7 +368,7 @@ namespace TradeHelper
                 }
             }
             c.passed = n > 0 && bad == 0;
-            c.summary = n + " quotes, " + bad + " off by more than 0.01%, worst " + (worst * 100).ToString("0.####") + "%";
+            c.summary = n + " quotes, " + bad + " off by more than 0.01%, worst " + (worst * 100).ToString("0.####") + "%; " + evSkip + " goods skipped (event changed since the scan)";
             return c;
         }
 
@@ -377,7 +384,7 @@ namespace TradeHelper
         Check CheckSpecialBuy(Snapshot snap)
         {
             var c = new Check { name = "special goods buy = game" };
-            int n = 0, bad = 0; double worst = 0;
+            int n = 0, bad = 0, evSkip = 0; double worst = 0;
             foreach (var m in snap.markets)
             {
                 if (!m.Exact) continue;
@@ -385,6 +392,7 @@ namespace TradeHelper
                 {
                     var sg = q.specialGoods;
                     if (!q.special || sg == null || sg.UsesEquipmentPressure || !q.buyable) continue;
+                    if (EventChanged(q)) { evSkip++; continue; }
                     var items = StoreItems(sg);
                     for (int k = 1; k <= Math.Min(5, items.Count); k++)
                     {
@@ -396,7 +404,7 @@ namespace TradeHelper
                 }
             }
             c.passed = n > 0 && bad == 0;
-            c.summary = n + " quotes, " + bad + " off by more than 0.1%, worst " + (worst * 100).ToString("0.###") + "%";
+            c.summary = n + " quotes, " + bad + " off by more than 0.1%, worst " + (worst * 100).ToString("0.###") + "%; " + evSkip + " goods skipped (event changed since the scan)";
             return c;
         }
 
@@ -422,13 +430,13 @@ namespace TradeHelper
             {
                 foreach (var b in l)
                 {
-                    if (b.storeDur == null || !b.buyable) continue;
+                    if (b.storeDur == null || !b.buyable || EventChanged(b)) continue;
                     var items = StoreItems(b.specialGoods);
                     int k = Math.Min(5, items.Count);
                     int used = 0;
                     foreach (var s in l)
                     {
-                        if (s == b || used >= 3) continue;
+                        if (s == b || used >= 3 || EventChanged(s)) continue;
                         used++;
                         double game = s.specialGoods.getPriceForPlayerSell(items.GetRange(0, k)) * Math.Max(0.0, 1.0 - s.tax);
                         double mod = s.SellBoughtRevenue(0, b, 0, k); n++;
@@ -532,33 +540,16 @@ namespace TradeHelper
             return c;
         }
 
-        // Trade stations of every known galaxy with the nearest planet (to choose what "beside a planet" means).
+        // Every galaxy market is named after the station(s) that open it.
         Check StationPlaces()
         {
-            var c = new Check { name = "trade stations and nearest planets", info = true, passed = true };
-            var gd = MarketScanner.Game;
-            int n = 0;
-            foreach (var g in gd.galaxyBlock.knownGalaxies)
-            {
-                if (g == null || g.exchangeSpace == null) continue;
-                string gname; try { gname = g.getName(); } catch { gname = g.id; }
-                var planets = new List<string>();
-                if (g.stars != null) foreach (var st in g.stars) if (st != null) planets.Add(MarketScanner.PlanetName(st) + "(r" + st.r.ToString("0") + ")");
-                var places = MarketScanner.TradeStations(gd, g);
-                foreach (var p in places)
-                {
-                    n++;
-                    c.details.Add(gname + " | " + p.name + " pos(" + p.pos.x.ToString("0") + "," + p.pos.y.ToString("0") + ") |" + p.pos.magnitude.ToString("0") + "| nearest " + p.planet + " d=" + p.distance.ToString("0") + " planetR=" + p.planetR.ToString("0"));
-                }
-                if (places.Count == 0) c.details.Add(gname + " | no trade station");
-                if (c.details.Count < 400) c.details.Add("  planets: " + string.Join(", ", planets));
-            }
-            c.summary = n + " trade stations";
+            var c = new Check { name = "market names", passed = true };
             foreach (var m in host.Latest.markets)
                 if (!m.planet && (m.name.StartsWith("寂幕旋区") || m.name.StartsWith("碧云转接") || m.name.StartsWith("库汇域")))
-                    c.details.Insert(0, "market: " + m.name + " | " + m.placeShort + " | " + m.where);
+                    c.details.Add(m.name + " | " + m.where);
             int bad = host.Latest.markets.FindAll(m => !m.planet && !m.name.Contains("·")).Count;
-            if (bad > 0) { c.passed = false; c.details.Insert(0, bad + " galaxy markets without a station name"); }
+            c.passed = bad == 0;
+            c.summary = host.Latest.markets.FindAll(m => !m.planet).Count + " galaxy markets, " + bad + " without a station name";
             return c;
         }
 
