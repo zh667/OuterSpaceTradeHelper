@@ -44,6 +44,7 @@ namespace TradeHelper.Ui
         readonly ScrollRect scroll;
         readonly List<RowUi> rows = new List<RowUi>();
         readonly List<TextMeshProUGUI> headers = new List<TextMeshProUGUI>();
+        readonly Dictionary<int, Kit.Check> headChecks = new Dictionary<int, Kit.Check>();
         readonly TextMeshProUGUI empty;
         public string emptyText = "没有数据";
 
@@ -70,6 +71,20 @@ namespace TradeHelper.Ui
                 int ci = i;
                 var c = cols[i];
                 var hrt = Kit.Place(Kit.New("H", head), cx, 0, c.width, HeadH);
+                if (c.checkGet != null && c.checkSet != null)
+                {
+                    // Select-all box for checkbox columns: ticks/unticks every row currently shown (after filters).
+                    var hc = Kit.Toggle(hrt, c.title, 4, 2, c.width - 6, false, v =>
+                    {
+                        foreach (var item in new List<T>(view))
+                            if (c.checkGet(item) != v) c.checkSet(item, v);
+                        Bind();
+                    });
+                    headChecks[i] = hc;
+                    headers.Add(hc.label);
+                    cx += c.width;
+                    continue;
+                }
                 var t = Kit.Txt(hrt, c.title, 16, Theme.Text, c.align, null, 11);
                 Kit.Stretch(t.rectTransform, 4, 0, 4, 0);
                 headers.Add(t);
@@ -230,6 +245,13 @@ namespace TradeHelper.Ui
 
         public void Bind()
         {
+            foreach (var kv in headChecks)
+            {
+                bool all = view.Count > 0;
+                var col = columns[kv.Key];
+                foreach (var item in view) { bool on; try { on = col.checkGet(item); } catch { on = false; } if (!on) { all = false; break; } }
+                kv.Value.On = all;
+            }
             float y = content.anchoredPosition.y;
             int first = Mathf.Max(0, Mathf.FloorToInt(y / RowH));
             empty.gameObject.SetActive(view.Count == 0);

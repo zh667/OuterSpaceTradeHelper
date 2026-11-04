@@ -302,11 +302,19 @@ namespace TradeHelper.Ui
         readonly Kit.Btn pauseBtn, initAll, catchAll;
         int show;
         float nextBind;
+        bool cancelInit, cancelCatch;
+
+        bool IsUninitialized(long uid)
+        {
+            var s = table.all.Find(x => x.uid == uid);
+            return s != null && !s.Initialized;
+        }
 
         string State(Station s)
         {
             if (host.settlement.currentUid == s.uid) return "补算中 · 剩" + host.settlement.currentLeft + "天";
             if (host.settlement.IsQueued(s.uid)) return "排队中";
+            if (host.settlement.IsCancelled(s.uid) && cfg.keepFresh.Contains(s.uid)) return "已取消（本次不自动补）";
             if (!s.Initialized) return s.Pending > 0 ? "未开过 · 欠" + s.Pending + "天" : "未开过";
             return s.Pending == 0 ? "实时" : "欠" + s.Pending + "天";
         }
@@ -320,31 +328,36 @@ namespace TradeHelper.Ui
 
         public SettlementView(Window w, RectTransform body, Config cfg, TradeHelperBehaviour host) : base(w, body, cfg, host)
         {
-            Kit.TxtAt(root, "补算 = 让游戏把这个站欠着的市场天数算完；初始化 = 第一次生成从没开过的站的货架。效果和你亲自打开那个站的交易所一样，会改变它的库存和价格。每帧只算一点，不会卡住游戏。", 0, 0, w.BodyW, 24, 14, Theme.Text2);
-            initAll = Kit.Button(root, "一键初始化所有未开过的站", 0, 30, 250, 32, () =>
+            Kit.TxtAt(root, "补算 = 让游戏把这个站欠着的天数算完；初始化 = 第一次生成从没开过的站的货架。效果和你打开那个站的交易所一样，会改变它的库存和价格。随时可以取消，已经算过的天数不会退回。", 0, 0, w.BodyW, 24, 14, Theme.Text2);
+            const float BW = 230, Gap = 8;
+            initAll = Kit.Button(root, "", 0, 30, BW, 32, () =>
             {
-                foreach (var s in table.all) if (!s.Initialized) host.settlement.Enqueue(s.uid);
-            }, true);
-            catchAll = Kit.Button(root, "补算所有欠天的站", 258, 30, 200, 32, () =>
-            {
-                foreach (var s in table.all) if (s.Initialized && s.Pending > 0) host.settlement.Enqueue(s.uid);
+                if (cancelInit) host.settlement.Cancel(uid => IsUninitialized(uid));
+                else foreach (var s in table.all) if (!s.Initialized) host.settlement.Enqueue(s.uid);
+                nextBind = 0;
             });
-            pauseBtn = Kit.Button(root, "暂停", 466, 30, 110, 32, () => { host.settlement.paused = !host.settlement.paused; });
-            Kit.Button(root, "清空队列", 584, 30, 110, 32, () => host.settlement.Clear());
-            Drop("显示：", 704, 30, 200, new List<string> { "全部", "未开过", "欠天", "实时", "保持实时的" }, 0, i => { show = i; table.Resort(); });
-            info = Kit.TxtAt(root, "", 914, 30, w.BodyW - 914, 32, 15, Theme.Text);
+            catchAll = Kit.Button(root, "", BW + Gap, 30, BW, 32, () =>
+            {
+                if (cancelCatch) host.settlement.Cancel(uid => !IsUninitialized(uid));
+                else foreach (var s in table.all) if (s.Initialized && s.Pending > 0) host.settlement.Enqueue(s.uid);
+                nextBind = 0;
+            });
+            pauseBtn = Kit.Button(root, "暂停", (BW + Gap) * 2, 30, BW, 32, () => { host.settlement.paused = !host.settlement.paused; nextBind = 0; });
+            Kit.Button(root, "全部取消", (BW + Gap) * 3, 30, BW, 32, () => { host.settlement.CancelAll(); nextBind = 0; });
+            Drop("显示：", (BW + Gap) * 4, 30, BW, new List<string> { "全部", "未开过", "欠天", "实时", "保持实时的" }, 0, i => { show = i; table.Resort(); });
+            info = Kit.TxtAt(root, "", 0, 68, w.BodyW, 26, 15, Theme.Text);
             var cols = new List<Column<Station>>
             {
                 new Column<Station> { title = "站", width = 330, text = s => s.name, key = s => s.name },
                 new Column<Station> { title = "状态", width = 200, text = State, key = s => s.Initialized ? s.Pending : 1000000 + s.Pending, numeric = true, color = StateColor },
                 new Column<Station> { title = "距舰队", width = 160, text = s => Fmt.Dist(s.fleetAu), key = s => s.fleetAu < 0 ? (IComparable)null : s.fleetAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
-                new Column<Station> { title = "操作", width = 150, buttonText = s => host.settlement.IsQueued(s.uid) ? "排队中" : (!s.Initialized ? "初始化" : (s.Pending > 0 ? "补算" : "已实时")),
-                    buttonEnabled = s => !host.settlement.IsQueued(s.uid) && (!s.Initialized || s.Pending > 0), buttonPrimary = s => !s.Initialized || s.Pending > 0,
-                    onButton = s => host.settlement.Enqueue(s.uid) },
+                new Column<Station> { title = "操作", width = 150, buttonText = s => host.settlement.IsQueued(s.uid) ? "取消" : (!s.Initialized ? "初始化" : (s.Pending > 0 ? "补算" : "已实时")),
+                    buttonEnabled = s => host.settlement.IsQueued(s.uid) || !s.Initialized || s.Pending > 0,
+                    onButton = s => { if (host.settlement.IsQueued(s.uid)) host.settlement.Cancel(id => id == s.uid); else host.settlement.Enqueue(s.uid); } },
                 new Column<Station> { title = "保持实时", width = 120, checkGet = s => cfg.keepFresh.Contains(s.uid),
                     checkSet = (s, v) => { if (v) { if (!cfg.keepFresh.Contains(s.uid)) cfg.keepFresh.Add(s.uid); host.settlement.Enqueue(s.uid); } else cfg.keepFresh.Remove(s.uid); cfg.Save(); } },
             };
-            table = new Table<Station>(root, 0, 72, w.BodyW, w.BodyH - 72, cols, cfg.settleSort, cfg.settleDesc);
+            table = new Table<Station>(root, 0, 100, w.BodyW, w.BodyH - 100, cols, cfg.settleSort, cfg.settleDesc);
             table.sortChanged = (c, d) => { cfg.settleSort = c; cfg.settleDesc = d; cfg.Save(); };
             table.filter = s => show == 0 || (show == 1 && !s.Initialized) || (show == 2 && s.Initialized && s.Pending > 0) || (show == 3 && s.Initialized && s.Pending == 0) || (show == 4 && cfg.keepFresh.Contains(s.uid));
         }
@@ -362,10 +375,17 @@ namespace TradeHelper.Ui
             if (Time.unscaledTime < nextBind) return;
             nextBind = Time.unscaledTime + 0.5f;
             var st = host.settlement;
-            int un = 0, owe = 0;
-            foreach (var s in table.all) { if (!s.Initialized) un++; else if (s.Pending > 0) owe++; }
-            initAll.Text = "一键初始化所有未开过的站（" + un + "）";
-            catchAll.Text = "补算所有欠天的站（" + owe + "）";
+            int un = 0, owe = 0, qInit = 0, qCatch = 0;
+            foreach (var s in table.all)
+            {
+                bool q = st.IsQueued(s.uid);
+                if (!s.Initialized) { un++; if (q) qInit++; }
+                else { if (s.Pending > 0) owe++; if (q) qCatch++; }
+            }
+            cancelInit = qInit > 0;
+            cancelCatch = qCatch > 0;
+            initAll.Text = cancelInit ? "取消初始化（还剩 " + qInit + " 站）" : "一键初始化未开过的站（" + un + "）";
+            catchAll.Text = cancelCatch ? "取消补算（还剩 " + qCatch + " 站）" : "补算所有欠天的站（" + owe + "）";
             pauseBtn.Text = st.paused ? "继续" : "暂停";
             info.text = (st.Pending > 0 ? "队列 " + st.Pending + " 个站" + (st.paused ? "（已暂停）" : "") : "队列空") +
                         "   本次已补 " + st.daysDoneTotal + " 天 / 完成 " + st.marketsDone + " 站" +
