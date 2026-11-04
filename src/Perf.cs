@@ -29,6 +29,7 @@ namespace TradeHelper
         // frame right after a garbage collection versus the worst other frame (tells GC pauses from other stalls).
         static long lastMem = -1; static int lastGc = -1;
         static long allocAll, allocMod; static int allocModUnknown;
+        public static long ModAllocatedTotal;   // since start, for tests
         static int gcFrames; static double gcFrameMax, otherFrameMax; static bool afterGc;
         public struct Alloc { public long mem; public int gc; }
         public static Alloc AllocBegin() => new Alloc { mem = GC.GetTotalMemory(false), gc = GC.CollectionCount(0) };
@@ -36,7 +37,7 @@ namespace TradeHelper
         {
             if (GC.CollectionCount(0) != a.gc) { allocModUnknown++; return; }
             long d = GC.GetTotalMemory(false) - a.mem;
-            if (d > 0) allocMod += d;
+            if (d > 0) { allocMod += d; ModAllocatedTotal += d; }
         }
 
         public static long Now => Stopwatch.GetTimestamp();

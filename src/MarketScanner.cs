@@ -27,6 +27,7 @@ namespace TradeHelper
         public float minCoef;
         public FWExchangeSpaceNormalGoods normal;
         public FWExchangeSpaceSpecialGoods specialGoods;
+        public float eventFactor = 1f; // galaxy event price factor used for this quote (FWGalaxyEventTradeEffects)
         public double occupancy;      // special: store occupancy = sum of the items' durability factors (getStoreOccupancy)
         public double buy1, sell1;    // first unit, tax included (cached at scan time)
 
@@ -129,7 +130,7 @@ namespace TradeHelper
         // Totals: normal goods in an up-to-date market use the game's own quote (exact); otherwise the model above.
         public double BuyCost(int k)
         {
-            if (exact && normal != null)
+            if (exact && normal != null && StillExact())
             {
                 try { return normal.QuoteTrade(-k).rawPrice * (1 + tax); } catch { }
             }
@@ -142,7 +143,7 @@ namespace TradeHelper
         public double SellHeld(int from, int k, List<FWBaseBean> items)
         {
             if (k <= 0) return 0;
-            if (special && exact && specialGoods != null && items != null && from + k <= items.Count)
+            if (special && exact && specialGoods != null && items != null && from + k <= items.Count && StillExact())
             {
                 try
                 {
@@ -157,9 +158,18 @@ namespace TradeHelper
             return SellRevenue(from + k) - (from > 0 ? SellRevenue(from) : 0);
         }
 
+        // The game's quote functions settle a market that owes days (EnsureSettledForUse). A quote marked exact at scan
+        // time is only asked live while its market still owes nothing and is not on the game's worker thread.
+        bool StillExact()
+        {
+            var ex = market?.ex;
+            if (ex == null || ex.uid == Settlement.inFlightUid) return false;
+            try { return !ex.hasPendingSettlement(); } catch { return false; }
+        }
+
         public double SellRevenue(int k)
         {
-            if (exact && normal != null)
+            if (exact && normal != null && StillExact())
             {
                 try { return normal.QuoteTrade(k).rawPrice * (1 - tax); } catch { }
             }
@@ -205,7 +215,7 @@ namespace TradeHelper
         public string fleetGalaxyId;
         public List<MarketInfo> markets = new List<MarketInfo>();
         public Dictionary<string, string> galaxyName = new Dictionary<string, string>();
-        public Dictionary<string, List<string>> stationNames = new Dictionary<string, List<string>>(); // galaxy -> stations with a trade button
+        public Dictionary<string, List<MarketScanner.StationPlace>> stationPlaces = new Dictionary<string, List<MarketScanner.StationPlace>>(); // galaxy -> stations with a trade button
         public Dictionary<string, string> baseOnStar = new Dictionary<string, string>();               // starId -> player's base name
         public Dictionary<string, List<FWBaseBean>> heldItems = new Dictionary<string, List<FWBaseBean>>(); // key -> the player's items, one entry per unit
         public List<FWBaseBean> Held(string key) { List<FWBaseBean> l; return key != null && heldItems.TryGetValue(key, out l) ? l : null; }
@@ -320,31 +330,67 @@ namespace TradeHelper
             return 0.3f;
         }
 
+        // The name a planet has on the game's maps: the star definition's replacement name when it has one, otherwise
+        // getStarName() (GalaxyMapView labels planets this way; 塞拉遗迹 is a replacement name).
+        public static string PlanetName(FWStarInfo st)
+        {
+            if (st == null) return "?";
+            try
+            {
+                var def = st.getStarDef();
+                if (def != null && !string.IsNullOrWhiteSpace(def.ReplaceName) && def.ReplaceName != "-1")
+                {
+                    var t = LanguageDef.getText(def.ReplaceName);
+                    if (!string.IsNullOrWhiteSpace(t)) return t;
+                }
+            }
+            catch { }
+            try { var n = st.getStarName(); if (!string.IsNullOrWhiteSpace(n)) return n; } catch { }
+            return st.starName ?? st.starId;
+        }
+
+        // Stations whose menu has the trade button (PageInGalaxySpace.setPlatfrom: a trade centre in the station's
+        // definition, or a story facility that StoryFacilityRules.CanTrade allows).
+        public static bool HasTradeButton(FWGameData gd, FWSpaceport sp)
+        {
+            if (sp == null) return false;
+            try
+            {
+                if (sp.IsStoryFacility) return StoryFacilityRules.CanTrade(gd, sp);
+                var def = sp.getDef();
+                return def != null && def.HasTradeCenterID();
+            }
+            catch { return false; }
+        }
+
+        public class StationPlace { public string name; }
+
+        // Stations of a galaxy whose menu opens its market. Stations are not tied to planets; only the galaxy and the
+        // station's own name tell the player where to go.
+        public static List<StationPlace> TradeStations(FWGameData gd, FWGalaxy g)
+        {
+            var res = new List<StationPlace>();
+            if (gd?.spaceportList == null || g == null) return res;
+            foreach (var sp in new List<FWSpaceport>(gd.spaceportList))
+                if (sp != null && sp.galaxyId == g.id && HasTradeButton(gd, sp)) res.Add(new StationPlace { name = SpName(sp) });
+            return res;
+        }
+
         // Where each market is used in the game. A galaxy's market (贸易市场) opens from the「交易」button of a space station in
         // that galaxy (PageInGalaxySpace.showExChange; story stations only when StoryFacilityRules.CanTrade). A planet's market
         // (地面交易行) opens only from a trade building in a base on that planet and trades with that base's ground storage
         // (ViewBuild_Fctions_Base.openTradeShopPage), so the fleet cannot sell there directly.
         static void BuildWhere(FWGameData gd, Snapshot snap)
         {
-            snap.stationNames.Clear(); snap.baseOnStar.Clear();
+            snap.stationPlaces.Clear(); snap.baseOnStar.Clear();
             try
             {
-                if (gd.spaceportList != null)
-                    foreach (var sp in new List<FWSpaceport>(gd.spaceportList))
-                    {
-                        if (sp == null || sp.galaxyId == null) continue;
-                        bool trade = false;
-                        try { trade = StoryFacilityRules.CanTrade(gd, sp); } catch { }
-                        if (!trade) continue;
-                        string n = null;
-                        try { n = sp.getName(); } catch { }
-                        if (string.IsNullOrEmpty(n)) continue;
-                        List<string> l;
-                        if (!snap.stationNames.TryGetValue(sp.galaxyId, out l)) snap.stationNames[sp.galaxyId] = l = new List<string>();
-                        if (!l.Contains(n)) l.Add(n);
-                    }
+                var galaxies = gd.galaxyBlock?.knownGalaxies;
+                if (galaxies != null)
+                    foreach (var g in galaxies)
+                        if (g?.id != null && g.exchangeSpace != null) snap.stationPlaces[g.id] = TradeStations(gd, g);
             }
-            catch (Exception e) { snap.errors.Add("读空间站名字失败: " + e.Message); }
+            catch (Exception e) { snap.errors.Add("读空间站位置失败: " + e.Message); }
             var gals = gd.galaxyBlock?.knownGalaxies;
             if (gals != null)
                 foreach (var g in gals)
@@ -374,10 +420,21 @@ namespace TradeHelper
             }
             else
             {
-                List<string> l;
-                m.where = snap.stationNames.TryGetValue(m.galaxyId ?? "", out l) && l.Count > 0
-                    ? "在 " + snap.GalaxyName(m.galaxyId) + " 星系的空间站点「交易」打开：" + string.Join("、", l.Count > 4 ? l.GetRange(0, 4) : l) + (l.Count > 4 ? " 等" : "")
-                    : "在 " + snap.GalaxyName(m.galaxyId) + " 星系的空间站点「交易」打开";
+                // Named after the station(s) whose trade button opens it, as the player finds them on the map.
+                List<StationPlace> l;
+                string gname = snap.GalaxyName(m.galaxyId);
+                if (snap.stationPlaces.TryGetValue(m.galaxyId ?? "", out l) && l.Count > 0)
+                {
+                    var names = new List<string>();
+                    foreach (var p in l) if (!names.Contains(p.name)) names.Add(p.name);
+                    m.name = gname + "·" + string.Join("/", names.Count > 2 ? names.GetRange(0, 2) : names) + (names.Count > 2 ? "等" : "");
+                    m.where = "在 " + gname + " 星系的 " + string.Join("、", names) + " 点「贸易市场」";
+                }
+                else
+                {
+                    m.name = gname + "·贸易市场";
+                    m.where = gname + " 星系现在没有能打开贸易市场的空间站";
+                }
             }
         }
 
@@ -397,9 +454,7 @@ namespace TradeHelper
                 foreach (var st in g.stars)
                 {
                     if (st?.exchangeSpace == null) continue;
-                    string sname;
-                    try { sname = st.getStarName(); } catch { sname = null; }
-                    if (string.IsNullOrEmpty(sname)) sname = st.starName ?? st.starId;
+                    string sname = PlanetName(st);
                     yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(st.exchangeSpace, new MarketInfo { uid = st.exchangeSpace.uid, name = sname + " 地面交易行", galaxyId = g.id, planet = true, starId = st.starId, star = st, observe = g.observaState });
                 }
             }
@@ -536,9 +591,22 @@ namespace TradeHelper
                 snap.marketsDone++;
                 var m = kv.Value;
                 snap.phase = "读站 " + m.name;
+                MarketInfo old;
+                // Being settled on the game's worker thread: do not read it now; keep what the last scan had.
+                if (kv.Key.uid == Settlement.inFlightUid)
+                {
+                    if (prevByUid.TryGetValue(m.uid, out old) && old.ex == kv.Key)
+                    {
+                        old.name = m.name; old.observe = m.observe; old.starId = m.starId; old.star = m.star;
+                        SetWhere(old, snap);
+                        old.fleetAu = snap.RouteAu(snap.fleetGalaxyId, old.galaxyId);
+                        snap.markets.Add(old);
+                        snap.marketsReused++;
+                    }
+                    continue;
+                }
                 long fp = 0;
                 try { fp = Fingerprint(kv.Key); } catch { fp = 0; }
-                MarketInfo old;
                 if (fp != 0 && prevByUid.TryGetValue(m.uid, out old) && old.fingerprint == fp && old.ex == kv.Key)
                 {
                     MarketCache omc;
@@ -883,6 +951,7 @@ namespace TradeHelper
                 if (q.ePool <= 0) q.ePool = Math.Max(1, def.MarketSize);
                 long te = Perf.Now;
                 float ev = EventPrice(ex.uid, it.GoodID);
+                q.eventFactor = ev;
                 Budget.tEvent += Perf.Now - te;
 
                 var ng = it as FWExchangeSpaceNormalGoods;

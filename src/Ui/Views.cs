@@ -42,8 +42,7 @@ namespace TradeHelper.Ui
             x += 228;
             sort = Drop("排序：", x, 0, w.BodyW - x, new List<string> { "净赚从高到低", "每光年净赚从高到低", "利润率从高到低", "到手从高到低", "成本从低到高", "舰队距离从近到远", "航程从近到远" }, 0,
                 i => { table.sortCol = SortCol[i]; table.desc = SortDesc[i]; table.Resort(); SaveSort(); });
-            Kit.TxtAt(root, "算到“再多买就开始亏”为止，两边税都扣了。违禁品、没发现的星系、星球地面交易行（舰队用不了）不出现。* = 已扣掉你计划里同一站要买/卖的数量。“估”= 那个站欠结算天数。", 0, 34, w.BodyW - 390, 22, 14, Theme.Text2);
-            Kit.Toggle(root, "含地面交易行", w.BodyW - 380, 31, 180, cfg.includeGround, v => { cfg.includeGround = v; cfg.Save(); host.RequestRefresh(true); });
+            Kit.TxtAt(root, "算到“再多买就开始亏”为止，两边税都扣了。违禁品和没发现的星系不出现。站名是“星系·空间站”，在那个空间站点「贸易市场」交易。* = 已扣掉你计划里同一站要买/卖的数量。“估”= 那个站欠结算天数。", 0, 34, w.BodyW - 200, 22, 14, Theme.Text2);
             Kit.Toggle(root, "含未发现的星系", w.BodyW - 190, 31, 190, cfg.includeUndiscovered, v => { cfg.includeUndiscovered = v; cfg.Save(); host.RequestRefresh(true); });
 
             var cols = new List<Column<TradeIdea>>
@@ -160,7 +159,7 @@ namespace TradeHelper.Ui
             const float LW = 500;
             var mcols = new List<Column<MarketInfo>>
             {
-                new Column<MarketInfo> { title = "站", width = 220, text = m => m.name + (m.Discovered ? "" : "（未发现）"), key = m => m.name, color = m => m.Discovered ? Theme.Text : Theme.Text2 },
+                new Column<MarketInfo> { title = "星系·空间站", width = 220, text = m => m.name + (m.Discovered ? "" : "（未发现）"), key = m => m.name, color = m => m.Discovered ? Theme.Text : Theme.Text2 },
                 new Column<MarketInfo> { title = "数据", width = 78, text = m => m.Freshness, key = m => m.initialized ? m.pendingDays : 100000, numeric = true, color = Fmt.FreshColor },
                 new Column<MarketInfo> { title = "税", width = 56, text = m => (m.tax * 100).ToString("0") + "%", key = m => m.tax, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<MarketInfo> { title = "距舰队", width = 130, text = m => Fmt.Dist(m.fleetAu), key = m => m.fleetAu < 0 ? (IComparable)null : m.fleetAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
@@ -217,11 +216,12 @@ namespace TradeHelper.Ui
         public override void OnSnapshot(Snapshot s)
         {
             base.OnSnapshot(s);
-            markets.SetData(s.markets);
+            markets.SetData(s.markets.FindAll(m => !m.planet || cfg.includeGround));
             selected = s.markets.Find(m => m.uid == selectedUid);
             if (selected == null && s.markets.Count > 0)
             {
-                var near = new List<MarketInfo>(s.markets);
+                var near = s.markets.FindAll(m => !m.planet || cfg.includeGround);
+                if (near.Count == 0) { head.text = ""; return; }
                 near.Sort((a, b) => (a.fleetAu < 0 ? double.MaxValue : a.fleetAu).CompareTo(b.fleetAu < 0 ? double.MaxValue : b.fleetAu));
                 selected = near.Find(m => m.initialized) ?? near[0];
                 selectedUid = selected.uid;
@@ -325,7 +325,7 @@ namespace TradeHelper.Ui
 
         string State(Station s)
         {
-            if (host.settlement.currentUid == s.uid) return "补算中 · 剩" + host.settlement.currentLeft + "天";
+            if (host.settlement.currentUid == s.uid) return "后台补算中 · " + host.settlement.currentLeft + "天";
             if (host.settlement.IsQueued(s.uid)) return "排队中";
             if (host.settlement.IsCancelled(s.uid) && cfg.keepFresh.Contains(s.uid)) return "已取消（本次不自动补）";
             if (!s.Initialized) return s.Pending > 0 ? "未开过 · 欠" + s.Pending + "天" : "未开过";
@@ -379,7 +379,7 @@ namespace TradeHelper.Ui
         {
             base.OnSnapshot(s);
             var rows = new List<Station>();
-            foreach (var m in s.markets) rows.Add(new Station { ex = m.ex, uid = m.uid, name = m.name + (m.Discovered ? "" : "（未发现）"), fleetAu = m.fleetAu, discovered = m.Discovered });
+            foreach (var m in s.markets) if (!m.planet || cfg.includeGround) rows.Add(new Station { ex = m.ex, uid = m.uid, name = m.name + (m.Discovered ? "" : "（未发现）"), fleetAu = m.fleetAu, discovered = m.Discovered });
             table.SetData(rows);
         }
 
@@ -426,9 +426,7 @@ namespace TradeHelper.Ui
             hk.text = cfg.hotkey;
             Kit.Button(root, "保存", 518, y, 80, 30, () => { if (!string.IsNullOrEmpty(hk.text)) { cfg.hotkey = hk.text.Trim(); cfg.Save(); } });
             y += 42;
-            int di = Array.IndexOf(DayOpts, cfg.daysPerFrame);
-            Drop("后台补算速度：", 0, y, 420, new List<string> { "每帧 1 天（最平滑）", "每帧 2 天", "每帧 3 天", "每帧 5 天", "每帧 10 天（最快，可能掉帧）" }, di < 0 ? 0 : di,
-                i => { cfg.daysPerFrame = DayOpts[i]; cfg.Save(); });
+            Kit.TxtAt(root, "后台补算：和你打开空间站交易所一样，交给游戏自己的后台线程算，一次一个站，不占游戏主画面的帧。", 0, y, 900, 30, 15, Theme.Text2);
             y += 42;
             int ri = Array.IndexOf(RefreshOpts, cfg.autoRefreshSeconds);
             Drop("面板打开时自动刷新：", 0, y, 420, new List<string> { "每 15 秒", "每 30 秒", "每 60 秒", "每 2 分钟", "不自动刷新" }, ri < 0 ? 1 : ri,

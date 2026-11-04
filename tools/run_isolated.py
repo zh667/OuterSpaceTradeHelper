@@ -128,7 +128,7 @@ def main():
     ap.add_argument("--save", default="zh6657", help="a save folder name; with --newest, the prefix of the player's saves")
     ap.add_argument("--exact-save", action="store_true", help="use --save as given instead of the newest save starting with it")
     ap.add_argument("--tests", default="all")
-    ap.add_argument("--limit", type=int, default=900)
+    ap.add_argument("--limit", type=int, default=900, help="seconds; use about 1800 with --tests settle")
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--refresh-runtime", action="store_true")
     a = ap.parse_args()
