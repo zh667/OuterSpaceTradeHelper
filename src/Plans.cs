@@ -432,8 +432,12 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                 if (p.state != 2) { soldAhead.TryGetValue(sk, out os); soldAhead[sk] = os + hold; }
                 p.sellAhead = os;
                 // Goods in hand are priced from the actual items (durability included) where the game can quote them.
-                var items = p.state == 1 ? snap.Held(p.key) : null;
-                p.curRevenue = sq != null && !sq.contraband && hold > 0 ? sq.SellHeld(os, hold, items) : double.NaN;
+                GoodsQuote anyQ = sq ?? bq;
+                var items = p.state == 1 ? snap.HeldSorted(p.key, anyQ != null ? anyQ.specialGoods : null) : null;
+                // Still to buy: the units sold are the items bought, with their durability.
+                int boughtFrom = p.buyAhead;
+                Func<GoodsQuote, int, double> revenueAt = (q2, from) => p.state == 0 && bq != null ? q2.SellBoughtRevenue(from, bq, boughtFrom, hold) : q2.SellHeld(from, hold, items);
+                p.curRevenue = sq != null && !sq.contraband && hold > 0 ? revenueAt(sq, os) : double.NaN;
                 if (sq != null && sq.contraband) p.note = "卖出站现在把它列为违禁品，卖不了";
                 if (p.sellMarket != null && p.sellMarket.planet && p.state != 2)
                     p.note = "注意：卖出站是星球的地面交易行，舰队不能直接卖（" + p.sellMarket.where + "）。看下面“现在卖最好的站”换一个。";
@@ -452,7 +456,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                     int oa;
                     if (m.uid == p.sellUid) oa = os;
                     else { sellTotal.TryGetValue(m.uid + "|" + p.gid, out oa); }
-                    p.alternatives.Add(new KeyValuePair<MarketInfo, double>(m, q.SellHeld(oa, hold, items)));
+                    p.alternatives.Add(new KeyValuePair<MarketInfo, double>(m, revenueAt(q, oa)));
                 }
                 p.alternatives.Sort((a, b) => b.Value.CompareTo(a.Value));
                 if (p.alternatives.Count > 5) p.alternatives.RemoveRange(5, p.alternatives.Count - 5);

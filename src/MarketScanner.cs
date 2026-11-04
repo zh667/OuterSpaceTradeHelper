@@ -51,11 +51,54 @@ namespace TradeHelper
             return baseFactor * Math.Max(minCoef, store);
         }
 
+        // Special goods (not ships) in store, best durability first, as the player would pick them: durability factor of
+        // each item and the running sum before it. FWExchangeSpaceSpecialGoods.calculatePrice prices an item at
+        // pBase x max(min, durability x pStore(occupancy)) and moves the occupancy by its durability.
+        public float[] storeDur;
+        public double[] durBefore;
+
+        public void SetStoreDurability(List<float> durs)
+        {
+            durs.Sort((a, b) => b.CompareTo(a));
+            storeDur = durs.ToArray();
+            durBefore = new double[storeDur.Length + 1];
+            for (int i = 0; i < storeDur.Length; i++) durBefore[i + 1] = durBefore[i] + storeDur[i];
+        }
+
+        double ItemAt(double durability, double occ)
+        {
+            float e = Math.Max(1f, ePool);
+            double store = 1.0 - Math.Max(0.0, occ - e) / e;
+            return baseFactor * Math.Max(minCoef, durability * store);
+        }
+
+        // Before tax: the i-th item (0-based) of a batch sold here after `from` full items, when the batch is the items
+        // bought from another market's store starting at its `start`-th best item (their durability carries over).
+        public double SellBoughtUnit(int from, GoodsQuote bought, int start, int i)
+        {
+            if (!special || bought?.storeDur == null || start + i >= bought.storeDur.Length) return SellUnit(from + i);
+            double occ = occupancy + from + (bought.durBefore[start + i] - bought.durBefore[start]);
+            return ItemAt(bought.storeDur[start + i], occ);
+        }
+
+        public double SellBoughtRevenue(int from, GoodsQuote bought, int start, int k)
+        {
+            if (!special || bought?.storeDur == null || start + k > bought.storeDur.Length)
+                return SellRevenue(from + k) - (from > 0 ? SellRevenue(from) : 0);
+            double sum = 0;
+            for (int i = 0; i < k; i++) sum += SellBoughtUnit(from, bought, start, i);
+            return sum * (1 - tax);
+        }
+
         // Price before tax of the i-th unit (0-based) the player buys. Special goods follow
         // FWExchangeSpaceSpecialGoods.calculatePrice: each unit is priced at the occupancy before it moves.
         public double BuyUnit(int i)
         {
-            if (special) return SpecialAt(occupancy - i);
+            if (special)
+            {
+                if (storeDur != null && i < storeDur.Length) return ItemAt(storeDur[i], occupancy - durBefore[i]);
+                return SpecialAt(occupancy - i);
+            }
             return NormalAt(stock - i - 0.5, pressure + i + 0.5);
         }
 
@@ -102,11 +145,10 @@ namespace TradeHelper
             {
                 try
                 {
-                    var sorted = new List<FWBaseBean>(items);
+                    // items: best durability first (Snapshot.HeldSorted), as calculatePrice orders them.
                     var sg = specialGoods;
-                    sorted.Sort((a, b) => sg.getPDurability(b).CompareTo(sg.getPDurability(a)));
-                    double b2 = sg.getPriceForPlayerSell(sorted.GetRange(0, from + k));
-                    double a2 = from > 0 ? sg.getPriceForPlayerSell(sorted.GetRange(0, from)) : 0;
+                    double b2 = sg.getPriceForPlayerSell(items.GetRange(0, from + k));
+                    double a2 = from > 0 ? sg.getPriceForPlayerSell(items.GetRange(0, from)) : 0;
                     if (b2 > 0) return (b2 - a2) * (1 - tax);
                 }
                 catch { }
@@ -165,6 +207,17 @@ namespace TradeHelper
         public Dictionary<string, string> baseOnStar = new Dictionary<string, string>();               // starId -> player's base name
         public Dictionary<string, List<FWBaseBean>> heldItems = new Dictionary<string, List<FWBaseBean>>(); // key -> the player's items, one entry per unit
         public List<FWBaseBean> Held(string key) { List<FWBaseBean> l; return key != null && heldItems.TryGetValue(key, out l) ? l : null; }
+        readonly HashSet<string> heldSorted = new HashSet<string>();
+        // The player's items of a goods, best durability first (the durability factor depends on the item only, so any
+        // market's goods line can rank them). Sorted once per snapshot.
+        public List<FWBaseBean> HeldSorted(string key, FWExchangeSpaceSpecialGoods sg)
+        {
+            var l = Held(key);
+            if (l == null || sg == null || heldSorted.Contains(key)) return l;
+            try { l.Sort((a, b) => sg.getPDurability(b).CompareTo(sg.getPDurability(a))); } catch { }
+            heldSorted.Add(key);
+            return l;
+        }
         public List<InvLocation> inventory = new List<InvLocation>();
         public Dictionary<string, string> itemKeyToGid = new Dictionary<string, string>();
         public Dictionary<string, string> itemNames = new Dictionary<string, string>();
@@ -706,13 +759,21 @@ namespace TradeHelper
                     q.specialGoods = sg;
                     // Same as getStoreOccupancy() without its settlement call: the sum of the stored items' durability factors.
                     double occ = 0;
+                    var durs = new List<float>();
+                    bool ships = false;
                     if (sg.goodsList != null)
                         for (int gi = 0; gi < sg.goodsList.Count; gi++)
                         {
                             var g = sg.goodsList[gi];
-                            if (g != null && g.goods != null) { try { occ += sg.getPDurability(g.goods); } catch { occ += 1; } }
+                            if (g == null || g.goods == null) continue;
+                            float d = 1f;
+                            try { d = sg.getPDurability(g.goods); } catch { }
+                            occ += d; durs.Add(d);
+                            if (g.goods is FWAirShip) ships = true;
                         }
                     q.occupancy = occ;
+                    // Ships are priced by their defects, not durability: they keep the plain model.
+                    if (!ships && !sg.UsesEquipmentPressure && durs.Count > 0) q.SetStoreDurability(durs);
                     q.buyable = !sg.isContraband && q.stock > 0;
                     q.minCoef = sg.itemType == 550 ? 0.5f : 0.1f;
                     // Same arithmetic as FWExchangeSpaceSpecialGoods.getPBase(), times the event price factor that

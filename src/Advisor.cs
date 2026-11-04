@@ -109,7 +109,8 @@ namespace TradeHelper
         {
             int maxUnits = (b.special ? Math.Min(b.stock, MaxSpecialUnits) : b.stock) - ob;
             if (maxUnits <= 0) return null;
-            Func<int, double> marg = i => s.SellUnit(i + os) * (1 - s.tax) - b.BuyUnit(i + ob) * (1 + b.tax);
+            // Special goods carry the durability of the items bought into the sale.
+            Func<int, double> marg = i => s.SellBoughtUnit(os, b, ob, i) * (1 - s.tax) - b.BuyUnit(i + ob) * (1 + b.tax);
             if (marg(0) <= 0) return null;
             int lo = 0, hi = maxUnits - 1;
             while (lo < hi)
@@ -121,7 +122,7 @@ namespace TradeHelper
             var idea = new TradeIdea { gid = b.gid, buy = b, sell = s, qty = q, planBuyOffset = ob, planSellOffset = os };
             // Exact game quotes when the market is up to date; units already claimed by plans are priced first.
             idea.cost = b.BuyCost(ob + q) - (ob > 0 ? b.BuyCost(ob) : 0);
-            idea.revenue = s.SellRevenue(os + q) - (os > 0 ? s.SellRevenue(os) : 0);
+            idea.revenue = s.SellBoughtRevenue(os, b, ob, q);
             return idea;
         }
 
@@ -147,6 +148,7 @@ namespace TradeHelper
                 SellIdea best = null;
                 foreach (var m in snap.markets)
                 {
+                    if (Budget.Over) { Budget.tSells += System.Diagnostics.Stopwatch.GetTimestamp() - t0; yield return null; t0 = System.Diagnostics.Stopwatch.GetTimestamp(); }
                     GoodsQuote q;
                     if (!m.byGid.TryGetValue(gid, out q) || !Usable(q, cfg)) continue;
                     double first = q.sell1;
@@ -160,7 +162,7 @@ namespace TradeHelper
                         if (q.SellUnit(mid) * (1 - q.tax) >= first * 0.5) lo = mid; else hi = mid - 1;
                     }
                     int sold = lo + 1;
-                    double rev = q.SellHeld(0, sold, snap.Held(kv.Key));
+                    double rev = q.SellHeld(0, sold, snap.HeldSorted(kv.Key, q.specialGoods));
                     if (sold <= 0) continue;
                     if (best == null || rev > best.revenue)
                         best = new SellIdea { key = kv.Key, have = kv.Value, qty = sold, market = q, revenue = rev, firstUnitNet = first };

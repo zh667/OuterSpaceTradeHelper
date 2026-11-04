@@ -113,6 +113,7 @@ namespace TradeHelper
             try
             {
                 var dir = cfg.DataDir;
+                Directory.CreateDirectory(dir);
                 path = Path.Combine(dir, "perf.log");
                 var fi = new FileInfo(path);
                 if (fi.Exists && fi.Length > 4 * 1024 * 1024)
