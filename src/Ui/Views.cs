@@ -42,7 +42,8 @@ namespace TradeHelper.Ui
             x += 228;
             sort = Drop("排序：", x, 0, w.BodyW - x, new List<string> { "净赚从高到低", "每光年净赚从高到低", "利润率从高到低", "到手从高到低", "成本从低到高", "舰队距离从近到远", "航程从近到远" }, 0,
                 i => { table.sortCol = SortCol[i]; table.desc = SortDesc[i]; table.Resort(); SaveSort(); });
-            Kit.TxtAt(root, "算到“再多买就开始亏”为止，两边税都扣了。违禁品、没发现的星系不出现。* = 已扣掉你计划里在同一站要买/卖的数量。“估”= 那个站欠结算天数。", 0, 34, w.BodyW - 200, 22, 14, Theme.Text2);
+            Kit.TxtAt(root, "算到“再多买就开始亏”为止，两边税都扣了。违禁品、没发现的星系、星球地面交易行（舰队用不了）不出现。* = 已扣掉你计划里同一站要买/卖的数量。“估”= 那个站欠结算天数。", 0, 34, w.BodyW - 390, 22, 14, Theme.Text2);
+            Kit.Toggle(root, "含地面交易行", w.BodyW - 380, 31, 180, cfg.includeGround, v => { cfg.includeGround = v; cfg.Save(); host.RequestRefresh(true); });
             Kit.Toggle(root, "含未发现的星系", w.BodyW - 190, 31, 190, cfg.includeUndiscovered, v => { cfg.includeUndiscovered = v; cfg.Save(); host.RequestRefresh(true); });
 
             var cols = new List<Column<TradeIdea>>
@@ -181,7 +182,8 @@ namespace TradeHelper.Ui
             x += 104;
             Drop("排序：", x, 0, gx + gw - x, new List<string> { "名称", "库存从多到少", "买价从低到高", "卖价从高到低", "税从低到高" }, 0,
                 i => { goods.sortCol = SortCol[i]; goods.desc = SortDesc[i]; goods.Resort(); cfg.goodsSort = goods.sortCol; cfg.goodsDesc = goods.desc; cfg.Save(); });
-            head = Kit.TxtAt(root, "", gx, 34, gw, 26, 16, Theme.Accent);
+            head = Kit.TxtAt(root, "", gx, 34, gw, 44, 16, Theme.Accent);
+            head.enableWordWrapping = true;
             var gcols = new List<Column<GoodsQuote>>
             {
                 new Column<GoodsQuote> { title = "货物", width = 190, text = q => q.name, key = q => q.name },
@@ -194,7 +196,7 @@ namespace TradeHelper.Ui
                 new Column<GoodsQuote> { title = "违禁", width = 56, text = q => q.contraband ? "违禁" : "", key = q => q.contraband ? 1 : 0, numeric = true, color = _ => Theme.Bad },
                 new Column<GoodsQuote> { title = "价格", width = 60, text = q => q.exact ? "实时" : "估", key = q => q.exact ? 0 : 1, numeric = true, color = q => q.exact ? Theme.Good : Theme.Warn },
             };
-            goods = new Table<GoodsQuote>(root, gx, 64, gw, w.BodyH - 64, gcols, cfg.goodsSort, cfg.goodsDesc);
+            goods = new Table<GoodsQuote>(root, gx, 82, gw, w.BodyH - 82, gcols, cfg.goodsSort, cfg.goodsDesc);
             goods.emptyText = "先在左边选一个站；“未开过”的站可以在“后台补算”页初始化。";
             goods.filter = q => (!cfg.goodsBuyableOnly || q.buyable) && (!cfg.hideContraband || !q.contraband) && (category == null || q.category == category) && Match(search, q.name);
         }
@@ -202,7 +204,7 @@ namespace TradeHelper.Ui
         void ShowGoods()
         {
             if (selected == null) { head.text = ""; goods.SetData(new List<GoodsQuote>()); return; }
-            head.text = selected.name + "    " + selected.Freshness + "    税 " + (selected.tax * 100).ToString("0") + "%    距舰队 " + Fmt.Dist(selected.fleetAu);
+            head.text = selected.name + "    " + selected.Freshness + "    税 " + (selected.tax * 100).ToString("0") + "%    距舰队 " + Fmt.Dist(selected.fleetAu) + "\n<size=13><color=#A4A5A6>" + selected.where + "</color></size>";
             var cats = new List<string>();
             foreach (var q in selected.goods) cats.Add(q.category);
             var l = Categories(snap, cats);
@@ -544,7 +546,7 @@ namespace TradeHelper.Ui
 
         public PlansView(Window w, RectTransform body, Config cfg, TradeHelperBehaviour host) : base(w, body, cfg, host)
         {
-            Kit.TxtAt(root, "在“跑商建议”或“卖库存”里点「追踪」加入。勾着「两站实时」时，计划用到的站会自动保持实时（每天补算，效果同打开交易所），路上价格怎么变这里都看得到；买到货后自动切换成“已买入”，继续盯卖出站。", 0, 0, w.BodyW, 24, 14, Theme.Text2);
+            Kit.TxtAt(root, "在“跑商建议”或“卖库存”里点「追踪」加入。状态：① 待买入 →（库存里多出这批货时自动）② 已买，待卖 →（卖掉后点「改为已完成」）③ 已完成。最右边「手动改状态」是按钮，不是状态", 0, 0, w.BodyW, 24, 14, Theme.Text2);
             Drop("显示：", 0, 30, 230, new List<string> { "进行中", "全部", "已完成" }, 0, i => { show = i; table.Resort(); });
             Kit.Button(root, "删除所有已完成", 238, 30, 230, 32, () =>
             {
@@ -555,7 +557,7 @@ namespace TradeHelper.Ui
             {
                 new Column<Plan> { title = "商品", width = 130, text = p => p.name, key = p => p.name },
                 new Column<Plan> { title = "数量", width = 56, text = p => p.HoldQty.ToString(), key = p => p.HoldQty, numeric = true, align = TextAlignmentOptions.MidlineRight },
-                new Column<Plan> { title = "状态", width = 104, text = p => p.StateText, key = p => p.state, numeric = true, color = p => p.state == 0 ? Theme.Accent : p.state == 1 ? Theme.Good : Theme.Text2 },
+                new Column<Plan> { title = "状态", width = 128, text = p => p.StateText, key = p => p.state, numeric = true, color = p => p.state == 0 ? Theme.Accent : p.state == 1 ? Theme.Good : Theme.Text2 },
                 new Column<Plan> { title = "在哪买", width = 176, text = p => Station(p.buyName, p.buyMarket), key = p => p.buyName, color = p => p.buyMarket != null ? Fmt.FreshColor(p.buyMarket) : Theme.Text2 },
                 new Column<Plan> { title = "去哪卖", width = 176, text = p => Station(p.sellName, p.sellMarket), key = p => p.sellName, color = p => p.sellMarket != null ? Fmt.FreshColor(p.sellMarket) : Theme.Text2 },
                 new Column<Plan> { title = "计划净赚", width = 96, text = p => Fmt.Money(p.PlanProfit), key = p => p.PlanProfit, numeric = true, align = TextAlignmentOptions.MidlineRight },
@@ -564,7 +566,7 @@ namespace TradeHelper.Ui
                 new Column<Plan> { title = "现在最好卖到", width = 176, text = p => p.alternatives.Count > 0 ? p.alternatives[0].Key.name : "?", key = p => p.alternatives.Count > 0 ? p.alternatives[0].Key.name : null },
                 new Column<Plan> { title = "舰队→下一站", width = 104, text = p => Fmt.Dist(p.fleetToNextAu), key = p => p.fleetToNextAu < 0 ? (IComparable)null : p.fleetToNextAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<Plan> { title = "两站实时", width = 92, checkGet = p => p.keepFresh, checkSet = (p, v) => { p.keepFresh = v; Plans.ApplyKeepFresh(p, cfg, host.settlement); Plans.Save(); } },
-                new Column<Plan> { title = "进度", width = 92, buttonText = p => p.state == 0 ? "已买入" : p.state == 1 ? "已卖完" : "已完成", buttonEnabled = p => p.state != 2,
+                new Column<Plan> { title = "手动改状态", width = 110, buttonText = p => p.state == 0 ? "改为已买入" : p.state == 1 ? "改为已完成" : "—", buttonEnabled = p => p.state != 2,
                     onButton = p => { if (p.state == 0) Plans.MarkBought(p, cfg, host.settlement); else if (p.state == 1) Plans.MarkDone(p, cfg); Refresh(); } },
                 new Column<Plan> { title = "", width = 70, buttonText = _ => "删除", onButton = p => { Plans.Remove(p, cfg); if (selected == p) selected = null; Refresh(); } },
             };
@@ -596,6 +598,10 @@ namespace TradeHelper.Ui
             if (p.buyMarket != null && p.state == 0) sb.Append("   买入站").Append(p.buyMarket.Exact ? "实时" : p.buyMarket.Freshness);
             if (p.sellMarket != null) sb.Append("   卖出站").Append(p.sellMarket.Exact ? "实时" : p.sellMarket.Freshness);
             sb.Append('\n');
+            if (p.sellMarket != null && !string.IsNullOrEmpty(p.sellMarket.where)) sb.Append("卖出站怎么去：").Append(p.sellMarket.where).Append('\n');
+            if (p.state >= 1 && p.buyUid >= 0)
+                sb.Append(p.autoBought ? "已在库存里看到 " + p.boughtQty + " 个（" + p.boughtAt + " 自动识别为已买入）" : "已买入（" + (p.boughtAt ?? "") + " 手动标记）")
+                  .Append("，下一步：到 ").Append(p.sellName).Append(" 卖出\n");
             if (!string.IsNullOrEmpty(p.note)) sb.Append("<color=#D8982F>").Append(p.note).Append("</color>\n");
             sb.Append("现在卖 ").Append(p.HoldQty).Append(" 个最好的站：");
             for (int i = 0; i < Math.Min(4, p.alternatives.Count); i++)

@@ -25,6 +25,20 @@ namespace TradeHelper
         public static long cacheHits, cacheMisses, cacheChecks, cacheMismatch;
         public static string path;
 
+        // Garbage: what the whole game allocates per window and how much of it the mod's own code allocated, plus the worst
+        // frame right after a garbage collection versus the worst other frame (tells GC pauses from other stalls).
+        static long lastMem = -1; static int lastGc = -1;
+        static long allocAll, allocMod; static int allocModUnknown;
+        static int gcFrames; static double gcFrameMax, otherFrameMax; static bool afterGc;
+        public struct Alloc { public long mem; public int gc; }
+        public static Alloc AllocBegin() => new Alloc { mem = GC.GetTotalMemory(false), gc = GC.CollectionCount(0) };
+        public static void AllocEnd(Alloc a)
+        {
+            if (GC.CollectionCount(0) != a.gc) { allocModUnknown++; return; }
+            long d = GC.GetTotalMemory(false) - a.mem;
+            if (d > 0) allocMod += d;
+        }
+
         public static long Now => Stopwatch.GetTimestamp();
         public static double Ms(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
 
@@ -45,6 +59,19 @@ namespace TradeHelper
             double dt = Time.unscaledDeltaTime * 1000.0;
             frameSumMs += dt; if (dt > frameMaxMs) frameMaxMs = dt;
             frames++;
+            long mem = GC.GetTotalMemory(false); int gc = GC.CollectionCount(0);
+            if (lastGc >= 0)
+            {
+                // A collection shows up in this frame's time or, if it ran after Update, in the next one.
+                if (gc != lastGc) { gcFrames++; if (dt > gcFrameMax) gcFrameMax = dt; afterGc = true; }
+                else
+                {
+                    if (mem > lastMem) allocAll += mem - lastMem;
+                    if (afterGc) { if (dt > gcFrameMax) gcFrameMax = dt; afterGc = false; }
+                    else if (dt > otherFrameMax) otherFrameMax = dt;
+                }
+            }
+            lastMem = mem; lastGc = gc;
             if (windowStart < 0) { windowStart = Time.unscaledTime; gc0Start = GC.CollectionCount(0); gcMaxStart = GC.CollectionCount(GC.MaxGeneration); }
             if (Time.unscaledTime - windowStart >= 30f) Flush(cfg);
         }
@@ -68,6 +95,10 @@ namespace TradeHelper
             int g0 = GC.CollectionCount(0), gm = GC.CollectionCount(GC.MaxGeneration);
             sb.Append(" | 垃圾回收 ").Append(gc0Start < 0 ? 0 : g0 - gc0Start).Append(" 次（完整 ").Append(gcMaxStart < 0 ? 0 : gm - gcMaxStart).Append(" 次）");
             gc0Start = g0; gcMaxStart = gm;
+            sb.Append("，回收那帧最慢 ").Append(gcFrameMax.ToString("0")).Append("ms，其他帧最慢 ").Append(otherFrameMax.ToString("0")).Append("ms");
+            sb.Append(" | 新分配 全部 ").Append((allocAll / 1048576.0).ToString("0")).Append("MB 其中模组 ").Append((allocMod / 1048576.0).ToString("0.0")).Append("MB");
+            if (allocModUnknown > 0) sb.Append("（另有 ").Append(allocModUnknown).Append(" 帧赶上回收没算）");
+            allocAll = allocMod = 0; allocModUnknown = 0; gcFrames = 0; gcFrameMax = otherFrameMax = 0;
             sb.Append(" | 内存 ").Append((GC.GetTotalMemory(false) / 1048576.0).ToString("0")).Append("MB");
             LastSummary = sb.ToString();
             Write(LastSummary, cfg);

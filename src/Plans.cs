@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using Newtonsoft.Json;
 using UnityEngine;
 
 namespace TradeHelper
@@ -32,24 +33,28 @@ namespace TradeHelper
         public bool keepFresh = true;
         public List<long> addedKeepFresh = new List<long>();
         public List<PlanPoint> history = new List<PlanPoint>();
+        public bool autoBought;                 // the purchase was seen in the inventory (not marked by hand)
+        public string boughtAt;
 
         // Live values (not saved).
-        [NonSerialized] public double curCost = double.NaN, curRevenue = double.NaN;
-        [NonSerialized] public int buyStock = -1, owned;
-        [NonSerialized] public MarketInfo buyMarket, sellMarket;
-        [NonSerialized] public List<KeyValuePair<MarketInfo, double>> alternatives = new List<KeyValuePair<MarketInfo, double>>();
-        [NonSerialized] public double fleetToNextAu = -1;
-        [NonSerialized] public string note = "";
-        [NonSerialized] public DateTime lastPointAt = DateTime.MinValue;
+        [JsonIgnore] [NonSerialized] public double curCost = double.NaN, curRevenue = double.NaN;
+        [JsonIgnore] [NonSerialized] public int buyStock = -1, owned;
+        [JsonIgnore] [NonSerialized] public MarketInfo buyMarket, sellMarket;
+        [JsonIgnore] [NonSerialized] public List<KeyValuePair<MarketInfo, double>> alternatives = new List<KeyValuePair<MarketInfo, double>>();
+        [JsonIgnore] [NonSerialized] public double fleetToNextAu = -1;
+        [JsonIgnore] [NonSerialized] public string note = "";
+        [JsonIgnore] [NonSerialized] public DateTime lastPointAt = DateTime.MinValue;
 
-        public double PlanProfit => planRevenue - planCost;
-        public double CurProfit => state == 0 ? curRevenue - curCost : curRevenue - planCost;
-        public int HoldQty => state == 0 ? qty : Math.Max(1, boughtQty);
-        public string StateText => state == 0 ? "待买入" : state == 1 ? "已买入 " + boughtQty + " 个" : "已完成";
+        [JsonIgnore] public double PlanProfit => planRevenue - planCost;
+        [JsonIgnore] public double CurProfit => state == 0 ? curRevenue - curCost : curRevenue - planCost;
+        [JsonIgnore] public int HoldQty => state == 0 ? qty : Math.Max(1, boughtQty);
+        // Stage of the plan. Stage 1 means "goods in hand, still to sell".
+        [JsonIgnore] public string StateText => state == 0 ? "① 待买入" : state == 1 ? "② 已买 " + boughtQty + "，待卖" : "③ 已完成";
     }
 
-    [Serializable]
-    class PlanFile { public List<Plan> plans = new List<Plan>(); }
+    // plans.json. Written with the game's Newtonsoft.Json: Unity's JsonUtility silently wrote "{}" for this file (0.3.0 and
+    // earlier), so plans did not survive a restart.
+    public class PlanFile { public int format = 2; public List<Plan> plans = new List<Plan>(); }
 
     public static class Plans
     {
@@ -58,6 +63,7 @@ namespace TradeHelper
         public static int version;
         static string Path => System.IO.Path.Combine(Config.Dir, "plans.json");
         const int HistoryMax = 60;
+        static bool saveChecked;
 
         public static void Load()
         {
@@ -65,7 +71,7 @@ namespace TradeHelper
             {
                 if (File.Exists(Path))
                 {
-                    var f = JsonUtility.FromJson<PlanFile>(File.ReadAllText(Path));
+                    var f = JsonConvert.DeserializeObject<PlanFile>(File.ReadAllText(Path));
                     if (f?.plans != null) list = f.plans;
                 }
             }
@@ -82,7 +88,19 @@ namespace TradeHelper
             try
             {
                 Directory.CreateDirectory(Config.Dir);
-                File.WriteAllText(Path, JsonUtility.ToJson(new PlanFile { plans = list }, true));
+                var json = JsonConvert.SerializeObject(new PlanFile { plans = list }, Formatting.Indented);
+                var tmp = Path + ".tmp";
+                File.WriteAllText(tmp, json);
+                File.Copy(tmp, Path, true);
+                File.Delete(tmp);
+                if (!saveChecked)
+                {
+                    // Once per session: read the file back and make sure every plan is in it.
+                    saveChecked = true;
+                    var back = JsonConvert.DeserializeObject<PlanFile>(File.ReadAllText(Path));
+                    int n = back?.plans?.Count ?? -1;
+                    Debug.Log("[TradeHelper] plans saved and read back: " + n + "/" + list.Count + (n == list.Count ? " ok" : " MISMATCH"));
+                }
             }
             catch (Exception e) { Debug.LogWarning("[TradeHelper] plans write failed: " + e.Message); }
         }
@@ -163,6 +181,8 @@ namespace TradeHelper
         {
             p.state = 1;
             version++;
+            p.autoBought = false;
+            p.boughtAt = DateTime.Now.ToString("MM-dd HH:mm");
             if (p.boughtQty <= 0) p.boughtQty = p.qty;
             ReleaseBuySide(p, cfg);
             Save();
@@ -201,6 +221,9 @@ namespace TradeHelper
                 p.buyMarket = snap.markets.Find(m => m.uid == p.buyUid);
                 p.sellMarket = snap.markets.Find(m => m.uid == p.sellUid);
                 p.owned = snap.Owned(p.key);
+                // Names follow the game (older plans saved the mod's earlier names).
+                if (p.sellMarket != null) p.sellName = p.sellMarket.name;
+                if (p.buyMarket != null && p.buyUid >= 0) p.buyName = p.buyMarket.name;
                 GoodsQuote bq = null, sq = null;
                 if (p.buyMarket != null) p.buyMarket.byGid.TryGetValue(p.gid, out bq);
                 if (p.sellMarket != null) p.sellMarket.byGid.TryGetValue(p.gid, out sq);
@@ -211,13 +234,15 @@ namespace TradeHelper
                     p.state = 1;
                     version++;
                     p.boughtQty = Math.Min(p.qty, p.owned - p.ownedAtStart);
+                    p.autoBought = true;
+                    p.boughtAt = DateTime.Now.ToString("MM-dd HH:mm");
                     ReleaseBuySide(p, cfg);
                     changed = true;
                 }
                 else if (p.state == 1 && p.buyUid >= 0 && p.owned <= p.ownedAtStart)
                 {
                     // Holding back to where it was: sold (or moved somewhere this panel does not see).
-                    p.note = "库存里已经看不到这批货：卖掉了的话点“完成”";
+                    p.note = "库存里已经看不到这批货：卖掉了的话点“改为已完成”";
                 }
 
                 int hold = p.HoldQty;
@@ -236,6 +261,8 @@ namespace TradeHelper
                 }
                 p.curRevenue = sq != null && !sq.contraband && hold > 0 ? sq.SellRevenue(hold) : double.NaN;
                 if (sq != null && sq.contraband) p.note = "卖出站现在把它列为违禁品，卖不了";
+                if (p.sellMarket != null && p.sellMarket.planet && p.state != 2)
+                    p.note = "注意：卖出站是星球的地面交易行，舰队不能直接卖（" + p.sellMarket.where + "）。看下面“现在卖最好的站”换一个。";
 
                 // Best places to sell the holding right now.
                 p.alternatives.Clear();
@@ -243,6 +270,8 @@ namespace TradeHelper
                 {
                     GoodsQuote q;
                     if (!m.byGid.TryGetValue(p.gid, out q) || q.contraband) continue;
+                    if (m.planet && !cfg.includeGround) continue;
+                    if (!m.Discovered && !cfg.includeUndiscovered) continue;
                     if (hold > 0) p.alternatives.Add(new KeyValuePair<MarketInfo, double>(m, q.SellRevenue(hold)));
                 }
                 p.alternatives.Sort((a, b) => b.Value.CompareTo(a.Value));
@@ -251,7 +280,7 @@ namespace TradeHelper
                 string next = p.state == 0 ? p.buyGalaxy : p.sellGalaxy;
                 p.fleetToNextAu = snap.RouteAu(snap.fleetGalaxyId, next);
 
-                if (p.state != 2 && !double.IsNaN(p.curRevenue))
+                if (p.state != 2 && !double.IsNaN(p.CurProfit))
                 {
                     var pt = new PlanPoint
                     {

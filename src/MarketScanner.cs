@@ -105,7 +105,10 @@ namespace TradeHelper
         public long uid;
         public string name;
         public string galaxyId;
-        public bool planet;
+        public bool planet;          // a planet's ground market (地面交易行): used from a base on that planet, not by the fleet
+        public string starId;
+        public string where = "";    // where in the game this market is opened
+        public string groundBase;    // planet market: the player's base on that planet, if any
         public bool initialized;
         public int pendingDays;
         public float tax;
@@ -134,6 +137,8 @@ namespace TradeHelper
         public string fleetGalaxyId;
         public List<MarketInfo> markets = new List<MarketInfo>();
         public Dictionary<string, string> galaxyName = new Dictionary<string, string>();
+        public Dictionary<string, List<string>> stationNames = new Dictionary<string, List<string>>(); // galaxy -> stations with a trade button
+        public Dictionary<string, string> baseOnStar = new Dictionary<string, string>();               // starId -> player's base name
         public List<InvLocation> inventory = new List<InvLocation>();
         public Dictionary<string, string> itemKeyToGid = new Dictionary<string, string>();
         public Dictionary<string, string> itemNames = new Dictionary<string, string>();
@@ -221,6 +226,67 @@ namespace TradeHelper
             return 0.3f;
         }
 
+        // Where each market is used in the game. A galaxy's market (贸易市场) opens from the「交易」button of a space station in
+        // that galaxy (PageInGalaxySpace.showExChange; story stations only when StoryFacilityRules.CanTrade). A planet's market
+        // (地面交易行) opens only from a trade building in a base on that planet and trades with that base's ground storage
+        // (ViewBuild_Fctions_Base.openTradeShopPage), so the fleet cannot sell there directly.
+        static void BuildWhere(FWGameData gd, Snapshot snap)
+        {
+            snap.stationNames.Clear(); snap.baseOnStar.Clear();
+            try
+            {
+                if (gd.spaceportList != null)
+                    foreach (var sp in new List<FWSpaceport>(gd.spaceportList))
+                    {
+                        if (sp == null || sp.galaxyId == null) continue;
+                        bool trade = false;
+                        try { trade = StoryFacilityRules.CanTrade(gd, sp); } catch { }
+                        if (!trade) continue;
+                        string n = null;
+                        try { n = sp.getName(); } catch { }
+                        if (string.IsNullOrEmpty(n)) continue;
+                        List<string> l;
+                        if (!snap.stationNames.TryGetValue(sp.galaxyId, out l)) snap.stationNames[sp.galaxyId] = l = new List<string>();
+                        if (!l.Contains(n)) l.Add(n);
+                    }
+            }
+            catch (Exception e) { snap.errors.Add("读空间站名字失败: " + e.Message); }
+            var gals = gd.galaxyBlock?.knownGalaxies;
+            if (gals != null)
+                foreach (var g in gals)
+                {
+                    if (g?.stars == null) continue;
+                    foreach (var st in g.stars)
+                    {
+                        if (st?.starMapList == null || st.starId == null) continue;
+                        foreach (var map in st.starMapList)
+                        {
+                            if (map == null || (map.type != FWStarMapInfo.TYPE_DEPUTY_BASE && map.type != FWStarMapInfo.TYPE_ROOT_BASE)) continue;
+                            if (!snap.baseOnStar.ContainsKey(st.starId)) snap.baseOnStar[st.starId] = string.IsNullOrEmpty(map.name) ? "你的基地" : map.name;
+                        }
+                    }
+                }
+        }
+
+        static void SetWhere(MarketInfo m, Snapshot snap)
+        {
+            if (m.planet)
+            {
+                string b = null;
+                if (m.starId != null) snap.baseOnStar.TryGetValue(m.starId, out b);
+                m.groundBase = b;
+                m.where = b != null ? "地面交易行：在你这颗星球上的基地「" + b + "」里用交易建筑打开，买卖的是基地地面仓库，舰队不能直接卖"
+                                    : "地面交易行：只能在这颗星球上自己的基地里打开（你在这里没有基地），舰队不能直接卖";
+            }
+            else
+            {
+                List<string> l;
+                m.where = snap.stationNames.TryGetValue(m.galaxyId ?? "", out l) && l.Count > 0
+                    ? "在 " + snap.GalaxyName(m.galaxyId) + " 星系的空间站点「交易」打开：" + string.Join("、", l.Count > 4 ? l.GetRange(0, 4) : l) + (l.Count > 4 ? " 等" : "")
+                    : "在 " + snap.GalaxyName(m.galaxyId) + " 星系的空间站点「交易」打开";
+            }
+        }
+
         public static IEnumerable<KeyValuePair<FWExchangeSpace, MarketInfo>> EnumerateExchanges(FWGameData gd)
         {
             var gals = gd?.galaxyBlock?.knownGalaxies;
@@ -232,12 +298,15 @@ namespace TradeHelper
                 string gname;
                 try { gname = g.getName(); } catch { gname = "星系" + g.id; }
                 if (g.exchangeSpace != null)
-                    yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(g.exchangeSpace, new MarketInfo { uid = g.exchangeSpace.uid, name = gname + " 空间站", galaxyId = g.id, observe = g.observaState });
+                    yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(g.exchangeSpace, new MarketInfo { uid = g.exchangeSpace.uid, name = gname + " 贸易市场", galaxyId = g.id, observe = g.observaState });
                 if (g.stars == null) continue;
                 foreach (var st in g.stars)
                 {
                     if (st?.exchangeSpace == null) continue;
-                    yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(st.exchangeSpace, new MarketInfo { uid = st.exchangeSpace.uid, name = (st.starName ?? st.starId) + "（星球市场）", galaxyId = g.id, planet = true, observe = g.observaState });
+                    string sname;
+                    try { sname = st.getStarName(); } catch { sname = null; }
+                    if (string.IsNullOrEmpty(sname)) sname = st.starName ?? st.starId;
+                    yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(st.exchangeSpace, new MarketInfo { uid = st.exchangeSpace.uid, name = sname + " 地面交易行", galaxyId = g.id, planet = true, starId = st.starId, observe = g.observaState });
                 }
             }
         }
@@ -362,6 +431,7 @@ namespace TradeHelper
 
             var list = new List<KeyValuePair<FWExchangeSpace, MarketInfo>>(EnumerateExchanges(gd));
             snap.marketsTotal = list.Count;
+            BuildWhere(gd, snap);
             var prev = lastComplete;
             var prevByUid = new Dictionary<long, MarketInfo>();
             if (prev != null) foreach (var pm in prev.markets) prevByUid[pm.uid] = pm;
@@ -381,7 +451,8 @@ namespace TradeHelper
                     if (ok)
                     {
                         // Nothing this station's numbers depend on has changed: keep its quotes.
-                        old.name = m.name; old.observe = m.observe;
+                        old.name = m.name; old.observe = m.observe; old.starId = m.starId;
+                        SetWhere(old, snap);
                         old.fleetAu = snap.RouteAu(snap.fleetGalaxyId, old.galaxyId);
                         snap.markets.Add(old);
                         snap.marketsReused++;
@@ -390,6 +461,7 @@ namespace TradeHelper
                     }
                 }
                 m.fingerprint = fp;
+                SetWhere(m, snap);
                 snap.markets.Add(m);
                 m.fleetAu = snap.RouteAu(snap.fleetGalaxyId, m.galaxyId);
                 IEnumerator inner = null;
@@ -420,7 +492,7 @@ namespace TradeHelper
                     foreach (var kv2 in loc.items) ih = Mix(ih, (long)kv2.Key.GetHashCode() * 31 + kv2.Value);
                 snap.inventoryHash = ih;
             }
-            snap.adviceKey = cfg.maxStaleDays + "|" + cfg.includeUndiscovered + "|" + Plans.version;
+            snap.adviceKey = cfg.maxStaleDays + "|" + cfg.includeUndiscovered + "|" + cfg.includeGround + "|" + Plans.version;
             if (prev != null && prev.complete && snap.marketsReused == snap.markets.Count && prev.markets.Count == snap.markets.Count &&
                 prev.inventoryHash == snap.inventoryHash && prev.adviceKey == snap.adviceKey)
             {
@@ -617,6 +689,12 @@ namespace TradeHelper
             }
         }
 
+        static string SpName(FWSpaceport sp)
+        {
+            try { var n = sp.getName(); if (!string.IsNullOrEmpty(n)) return n; } catch { }
+            return "空间站";
+        }
+
         static void ScanInventory(FWGameData gd, Snapshot snap)
         {
             var seen = new HashSet<long>();
@@ -667,7 +745,7 @@ namespace TradeHelper
                     foreach (var sp in new List<FWSpaceport>(gd.spaceportList))
                     {
                         if (sp?.things == null || sp.things.Count == 0) continue;
-                        var loc = new InvLocation { name = snap.GalaxyName(sp.galaxyId) + " 空间站仓库", galaxyId = sp.galaxyId };
+                        var loc = new InvLocation { name = snap.GalaxyName(sp.galaxyId) + " " + SpName(sp) + " 仓库", galaxyId = sp.galaxyId };
                         AddThings(loc, new List<FWThingBean>(sp.things));
                         if (loc.items.Count > 0) snap.inventory.Add(loc);
                     }

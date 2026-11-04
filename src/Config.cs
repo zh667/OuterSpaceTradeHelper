@@ -31,6 +31,8 @@ namespace TradeHelper
         public bool hideContraband = true;
         // Galaxies the player has not discovered are not on the map; leave them out of advice unless asked.
         public bool includeUndiscovered = false;
+        // Planet ground markets (地面交易行) in route advice. Off: the fleet cannot trade there.
+        public bool includeGround = false;
         // 0 = always AU with thousands separators; 1 = like the game's route panels (AU, or ly above one light year).
         public int distanceUnit = 0;
 

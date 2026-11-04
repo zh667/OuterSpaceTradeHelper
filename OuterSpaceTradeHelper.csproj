@@ -32,6 +32,7 @@
     <Reference Include="Unity.TextMeshPro"><HintPath>$(GameManaged)\Unity.TextMeshPro.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Unity.ResourceManager"><HintPath>$(GameManaged)\Unity.ResourceManager.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Unity.Addressables"><HintPath>$(GameManaged)\Unity.Addressables.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Newtonsoft.Json"><HintPath>$(GameManaged)\Newtonsoft.Json.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.ImageConversionModule"><HintPath>$(GameManaged)\UnityEngine.ImageConversionModule.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 </Project>
