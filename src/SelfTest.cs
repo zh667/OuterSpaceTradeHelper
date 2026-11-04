@@ -470,6 +470,26 @@ namespace TradeHelper
             yield return Refresh();
             bool stage2 = plan.state == 1 && plan.boughtQty == k && plan.autoBought;
             c.details.Add("after buying: " + plan.StateText + (stage2 ? " ok" : " WRONG (expected stage 2 with " + k + ")"));
+            // "现在最好卖到 / 比计划": selling at the plan's own market gives the plan's current profit, and the best market
+            // is at least as good.
+            var own = plan.alternatives.Find(a => a.Key != null && a.Key.uid == plan.sellUid);
+            bool bestOk = plan.alternatives.Count > 0 && !double.IsNaN(plan.BestProfit) && plan.BestProfit >= plan.CurProfit - 2
+                          && (own.Key == null || SameMoney(plan.ProfitIfSoldFor(own.Value), plan.CurProfit));
+            c.details.Add("best market now: " + (plan.alternatives.Count > 0 ? plan.alternatives[0].Key.name : "none") + ", profit " + plan.BestProfit.ToString("0")
+                          + " vs plan " + plan.PlanProfit.ToString("0") + " / at the plan's market " + plan.CurProfit.ToString("0")
+                          + (own.Key != null ? " (own market listed: " + plan.ProfitIfSoldFor(own.Value).ToString("0") + ")" : " (own market not in the top 5)") + (bestOk ? " ok" : " WRONG"));
+            host.SetVisible(true);
+            host.ShowTab(1);
+            yield return new WaitForSecondsRealtime(1);
+            Ui.PlansView.Current?.Select(plan);
+            yield return new WaitForSecondsRealtime(1);
+            yield return Shot("plans-holding");
+            string shown = Ui.PlansView.Current != null ? Ui.PlansView.Current.DetailText : "";
+            int at = shown.IndexOf("现在卖 ");
+            bool detailOk = at >= 0 && shown.IndexOf("比计划", at) > 0;
+            c.details.Add("plan detail: " + (at >= 0 ? System.Text.RegularExpressions.Regex.Replace(shown.Substring(at), "<[^>]+>", "").Split('\n')[0] : "no best-market line") + (detailOk ? " ok" : " WRONG"));
+            bestOk &= detailOk;
+            host.SetVisible(false);
 
             // Sell the bought items at the plan's sell market.
             double estimate = plan.curRevenue;
@@ -512,7 +532,7 @@ namespace TradeHelper
             var route = Plans.Routes().Find(r => r.name == qb.name && r.to == plan.sellName && !r.held);
             bool routeOk = route != null && route.count == 1 && route.units == k && SameMoney(route.profit, payS - idea.cost);
             c.details.Add("route summary: " + (route == null ? "missing" : route.count + " time(s), " + route.units + " units, profit " + route.profit.ToString("0") + " (expected " + (payS - idea.cost).ToString("0") + ")") + (routeOk ? " ok" : " WRONG"));
-            c.passed = buyOk && stage2 && sellOk && stage3 && creditsOk && routeOk;
+            c.passed = buyOk && stage2 && bestOk && sellOk && stage3 && creditsOk && routeOk;
             c.summary = (c.passed ? "all steps match" : "some steps differ") + " (" + qb.name + " " + qb.market.name + " -> " + qs.market.name + ")";
         }
 

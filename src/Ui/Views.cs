@@ -528,18 +528,22 @@ namespace TradeHelper.Ui
 
         static string Signed(double v) => (v >= 0 ? "+" : "") + Fmt.Money(v);
 
-        static string Change(Plan p)
+        // Change of a net profit against the plan's, in percent of the planned profit.
+        static string Change(Plan p, double profit)
         {
-            if (double.IsNaN(p.CurProfit) || p.PlanProfit == 0) return "?";
-            double d = (p.CurProfit - p.PlanProfit) / Math.Abs(p.PlanProfit) * 100;
+            if (double.IsNaN(profit) || p.PlanProfit == 0) return "?";
+            double d = (profit - p.PlanProfit) / Math.Abs(p.PlanProfit) * 100;
             return (d >= 0 ? "+" : "") + d.ToString("0") + "%";
         }
 
-        static Color ChangeColor(Plan p)
+        static Color ChangeColor(Plan p, double profit)
         {
-            if (double.IsNaN(p.CurProfit)) return Theme.Text2;
-            return p.CurProfit >= p.PlanProfit ? Theme.Good : (p.CurProfit > 0 ? Theme.Warn : Theme.Bad);
+            if (double.IsNaN(profit)) return Theme.Text2;
+            return profit >= p.PlanProfit ? Theme.Good : (profit > 0 ? Theme.Warn : Theme.Bad);
         }
+
+        static string Change(Plan p) => Change(p, p.CurProfit);
+        static Color ChangeColor(Plan p) => ChangeColor(p, p.CurProfit);
 
         static string Station(string name, MarketInfo m) => m == null ? name : name + (m.Exact ? "" : " · " + m.Freshness);
 
@@ -556,19 +560,21 @@ namespace TradeHelper.Ui
             var cols = new List<Column<Plan>>
             {
                 new Column<Plan> { title = "商品", width = 130, text = p => p.name, key = p => p.name },
-                new Column<Plan> { title = "数量", width = 56, text = p => p.ShownQty.ToString(), key = p => p.ShownQty, numeric = true, align = TextAlignmentOptions.MidlineRight },
-                new Column<Plan> { title = "状态", width = 128, text = p => p.StateText, key = p => p.state, numeric = true, color = p => p.state == 0 ? Theme.Accent : p.state == 1 ? Theme.Good : Theme.Text2 },
+                new Column<Plan> { title = "数量", width = 48, text = p => p.ShownQty.ToString(), key = p => p.ShownQty, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<Plan> { title = "状态", width = 144, text = p => p.StateText, key = p => p.state, numeric = true, color = p => p.state == 0 ? Theme.Accent : p.state == 1 ? Theme.Good : Theme.Text2 },
                 new Column<Plan> { title = "在哪买", width = 176, text = p => Station(p.buyName, p.buyMarket), key = p => p.buyName, color = p => p.buyMarket != null ? Fmt.FreshColor(p.buyMarket) : Theme.Text2 },
                 new Column<Plan> { title = "去哪卖", width = 176, text = p => Station(p.sellName, p.sellMarket), key = p => p.sellName, color = p => p.sellMarket != null ? Fmt.FreshColor(p.sellMarket) : Theme.Text2 },
-                new Column<Plan> { title = "计划净赚", width = 96, text = p => Fmt.Money(p.PlanProfit), key = p => p.PlanProfit, numeric = true, align = TextAlignmentOptions.MidlineRight },
-                new Column<Plan> { title = "现在净赚", width = 96, text = p => double.IsNaN(p.CurProfit) ? "?" : Fmt.Money(p.CurProfit) + (p.sellAhead > 0 || p.buyAhead > 0 ? "*" : ""), key = p => double.IsNaN(p.CurProfit) ? (IComparable)null : p.CurProfit, numeric = true, align = TextAlignmentOptions.MidlineRight, color = ChangeColor },
-                new Column<Plan> { title = "变化", width = 70, text = Change, key = p => double.IsNaN(p.CurProfit) ? (IComparable)null : p.CurProfit - p.PlanProfit, numeric = true, align = TextAlignmentOptions.MidlineRight, color = ChangeColor },
+                new Column<Plan> { title = "计划净赚", width = 90, text = p => Fmt.Money(p.PlanProfit), key = p => p.PlanProfit, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<Plan> { title = "现在净赚", width = 90, text = p => double.IsNaN(p.CurProfit) ? "?" : Fmt.Money(p.CurProfit) + (p.sellAhead > 0 || p.buyAhead > 0 ? "*" : ""), key = p => double.IsNaN(p.CurProfit) ? (IComparable)null : p.CurProfit, numeric = true, align = TextAlignmentOptions.MidlineRight, color = ChangeColor },
+                new Column<Plan> { title = "变化", width = 62, text = Change, key = p => double.IsNaN(p.CurProfit) ? (IComparable)null : p.CurProfit - p.PlanProfit, numeric = true, align = TextAlignmentOptions.MidlineRight, color = ChangeColor },
                 new Column<Plan> { title = "现在最好卖到", width = 176, text = p => p.alternatives.Count > 0 ? p.alternatives[0].Key.name : "?", key = p => p.alternatives.Count > 0 ? p.alternatives[0].Key.name : null },
+                // Net profit if sold at that best market instead, against the planned profit.
+                new Column<Plan> { title = "比计划", width = 64, text = p => Change(p, p.BestProfit), key = p => double.IsNaN(p.BestProfit) ? (IComparable)null : p.BestProfit - p.PlanProfit, numeric = true, align = TextAlignmentOptions.MidlineRight, color = p => ChangeColor(p, p.BestProfit) },
                 new Column<Plan> { title = "舰队→下一站", width = 104, text = p => Fmt.Dist(p.fleetToNextAu), key = p => p.fleetToNextAu < 0 ? (IComparable)null : p.fleetToNextAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<Plan> { title = "两站实时", width = 92, checkGet = p => p.keepFresh, checkSet = (p, v) => { p.keepFresh = v; Plans.ApplyKeepFresh(p, cfg, host.settlement); Plans.Save(); } },
-                new Column<Plan> { title = "手动改状态", width = 110, buttonText = p => p.state == 0 ? "改为已买入" : p.state == 1 ? "改为已完成" : "改回已买入",
+                new Column<Plan> { title = "手动改状态", width = 100, buttonText = p => p.state == 0 ? "改为已买入" : p.state == 1 ? "改为已完成" : "改回已买入",
                     onButton = p => { if (p.state == 0) Plans.MarkBought(p, cfg, host.settlement); else if (p.state == 1) Plans.MarkDone(p, cfg); else Plans.Reopen(p, cfg, host.settlement); Refresh(); } },
-                new Column<Plan> { title = "", width = 70, buttonText = _ => "删除", onButton = p => { Plans.Remove(p, cfg); if (selected == p) selected = null; Refresh(); } },
+                new Column<Plan> { title = "", width = 60, buttonText = _ => "删除", onButton = p => { Plans.Remove(p, cfg); if (selected == p) selected = null; Refresh(); } },
             };
             table = new Table<Plan>(root, 0, 70, w.BodyW, w.BodyH - 70 - 190, cols, 2, false);
             table.emptyText = "还没有追踪的计划。在“跑商建议”或“卖库存”里点「追踪」。";
@@ -581,9 +587,15 @@ namespace TradeHelper.Ui
             Kit.Stretch(detail.rectTransform, 12, 8, 12, 8);
             detail.enableWordWrapping = true;
             detail.overflowMode = TextOverflowModes.Truncate;
+            Current = this;
         }
 
         void Refresh() { table.SetData(new List<Plan>(Plans.list)); ShowSummary(); ShowDetail(); }
+
+        // For the self-test: the open plans page, selecting a plan as a click would, and the detail text shown.
+        public static PlansView Current;
+        public void Select(Plan p) { selected = p; Refresh(); }
+        public string DetailText => detail.text;
 
         // Totals over completed plans: trade plans (bought, then sold) and plans that sold stock already held are kept
         // apart, since the latter have no purchase cost.
@@ -635,8 +647,13 @@ namespace TradeHelper.Ui
             if (!string.IsNullOrEmpty(p.note)) sb.Append("<color=#D8982F>").Append(p.note).Append("</color>\n");
             sb.Append("现在卖 ").Append(p.HoldQty).Append(" 个最好的站：");
             for (int i = 0; i < Math.Min(4, p.alternatives.Count); i++)
-                sb.Append(i == 0 ? "" : "；").Append(p.alternatives[i].Key.name).Append(" ").Append(Fmt.Money(p.alternatives[i].Value))
+            {
+                double np = p.ProfitIfSoldFor(p.alternatives[i].Value);
+                sb.Append(i == 0 ? "" : "；").Append(p.alternatives[i].Key.name).Append(" 到手 ").Append(Fmt.Money(p.alternatives[i].Value))
                   .Append(p.alternatives[i].Key.Exact ? "" : "(估)");
+                if (!double.IsNaN(np))
+                    sb.Append("，净赚 <color=#").Append(ColorUtility.ToHtmlStringRGB(ChangeColor(p, np))).Append(">").Append(Fmt.Money(np)).Append("（比计划 ").Append(Change(p, np)).Append("）</color>");
+            }
             sb.Append('\n');
             sb.Append("利润记录：");
             int from = Math.Max(0, p.history.Count - 8);

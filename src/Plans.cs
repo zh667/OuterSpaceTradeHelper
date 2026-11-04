@@ -58,6 +58,13 @@ namespace TradeHelper
         [JsonIgnore] public double CurProfit => state == 0 ? curRevenue - curCost
                                                : state == 1 ? (HoldQty > 0 ? curRevenue : 0) + soldRevenue - planCost
                                                : soldRevenue - planCost;
+        // Net profit if the goods still to sell went to a market paying `revenue` for them (stage 1: at today's buying
+        // cost; stage 2: what was paid, plus what the units already gone brought in).
+        public double ProfitIfSoldFor(double revenue) => state == 0 ? revenue - curCost
+                                                       : state == 1 ? revenue + soldRevenue - planCost
+                                                       : double.NaN;
+        // Net profit if everything still to sell went to the best market right now (NaN when there is none).
+        [JsonIgnore] public double BestProfit => alternatives.Count > 0 ? ProfitIfSoldFor(alternatives[0].Value) : double.NaN;
         // Units still to buy (stage 1) or still in hand to sell (stage 2).
         [JsonIgnore] public int HoldQty => state == 0 ? qty : Math.Max(0, boughtQty - soldQty);
         [JsonIgnore] public int ShownQty => state == 2 ? boughtQty : HoldQty;
