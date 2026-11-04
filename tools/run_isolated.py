@@ -158,12 +158,25 @@ def main():
     si = subprocess.STARTUPINFO()
     si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     si.wShowWindow = 7   # minimised, not activated: the player's window keeps the focus
+    env = dict(os.environ, UNITY_MIXED_CALLSTACK="1")   # pmip files name the managed frames in a dump
     proc = subprocess.Popen([str(RUNTIME / "Outer Space.exe"), "-screen-fullscreen", "0", "-screen-width", "1600",
-                             "-screen-height", "900", "-logFile", str(log)], cwd=RUNTIME, startupinfo=si)
+                             "-screen-height", "900", "-logFile", str(log)], cwd=RUNTIME, startupinfo=si, env=env)
     print("started pid", proc.pid)
     t0 = time.time()
+    beat = RUNTIME / "selftest-heartbeat.txt"
+    if beat.exists():
+        beat.unlink()
+    hung = None
     while time.time() - t0 < a.limit and not res.exists() and proc.poll() is None:
         time.sleep(3)
+        # A heartbeat that stops for a minute while the process is alive means the game froze.
+        if beat.exists() and time.time() - beat.stat().st_mtime > 60:
+            hung = beat.read_text(encoding="utf-8", errors="replace")
+            print("FROZEN: no heartbeat since", time.ctime(beat.stat().st_mtime), "| last:", hung)
+            r = subprocess.run([sys.executable, str(ROOT / "tools" / "freeze_dump.py"), str(proc.pid), str(ROOT / "local" / "dumps")],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+            print(r.stdout[-6000:], r.stderr[-1500:])
+            break
     time.sleep(5)
     if proc.poll() is None:
         proc.kill()
@@ -185,6 +198,9 @@ def main():
         passed = json.loads(res.read_text(encoding="utf-8")).get("passed") is True if res.exists() else False
     except ValueError:
         passed = False
+    if hung is not None:
+        passed = False
+        print("FAIL: the game froze")
     if mod_exceptions:
         passed = False
         print("FAIL: exceptions thrown from mod code")
