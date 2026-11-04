@@ -42,8 +42,7 @@ namespace TradeHelper.Ui
             x += 228;
             sort = Drop("排序：", x, 0, w.BodyW - x, new List<string> { "净赚从高到低", "每光年净赚从高到低", "利润率从高到低", "到手从高到低", "成本从低到高", "舰队距离从近到远", "航程从近到远" }, 0,
                 i => { table.sortCol = SortCol[i]; table.desc = SortDesc[i]; table.Resort(); SaveSort(); });
-            Kit.TxtAt(root, "算到“再多买就开始亏”为止，两边税都扣了。违禁品、没发现的星系、星球地面交易行（舰队用不了）不出现。* = 已扣掉你计划里同一站要买/卖的数量。“估”= 那个站欠结算天数。", 0, 34, w.BodyW - 390, 22, 14, Theme.Text2);
-            Kit.Toggle(root, "含地面交易行", w.BodyW - 380, 31, 180, cfg.includeGround, v => { cfg.includeGround = v; cfg.Save(); host.RequestRefresh(true); });
+            Kit.TxtAt(root, "算到“再多买就开始亏”为止，两边税都扣了。违禁品和没发现的星系不出现。站名是“星系·空间站”，在那个空间站点「贸易市场」交易。* = 已扣掉你计划里同一站要买/卖的数量。“估”= 那个站欠结算天数。", 0, 34, w.BodyW - 200, 22, 14, Theme.Text2);
             Kit.Toggle(root, "含未发现的星系", w.BodyW - 190, 31, 190, cfg.includeUndiscovered, v => { cfg.includeUndiscovered = v; cfg.Save(); host.RequestRefresh(true); });
 
             var cols = new List<Column<TradeIdea>>
@@ -157,10 +156,11 @@ namespace TradeHelper.Ui
 
         public MarketsView(Window w, RectTransform body, Config cfg, TradeHelperBehaviour host) : base(w, body, cfg, host)
         {
-            const float LW = 500;
+            const float LW = 620;
             var mcols = new List<Column<MarketInfo>>
             {
-                new Column<MarketInfo> { title = "站", width = 220, text = m => m.name + (m.Discovered ? "" : "（未发现）"), key = m => m.name, color = m => m.Discovered ? Theme.Text : Theme.Text2 },
+                new Column<MarketInfo> { title = "星系·空间站", width = 220, text = m => m.name + (m.Discovered ? "" : "（未发现）"), key = m => m.name, color = m => m.Discovered ? Theme.Text : Theme.Text2 },
+                new Column<MarketInfo> { title = "位置", width = 120, text = m => m.planet ? "地面" : m.placeShort, key = m => m.placeShort, color = _ => Theme.Text2 },
                 new Column<MarketInfo> { title = "数据", width = 78, text = m => m.Freshness, key = m => m.initialized ? m.pendingDays : 100000, numeric = true, color = Fmt.FreshColor },
                 new Column<MarketInfo> { title = "税", width = 56, text = m => (m.tax * 100).ToString("0") + "%", key = m => m.tax, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<MarketInfo> { title = "距舰队", width = 130, text = m => Fmt.Dist(m.fleetAu), key = m => m.fleetAu < 0 ? (IComparable)null : m.fleetAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
@@ -217,11 +217,12 @@ namespace TradeHelper.Ui
         public override void OnSnapshot(Snapshot s)
         {
             base.OnSnapshot(s);
-            markets.SetData(s.markets);
+            markets.SetData(s.markets.FindAll(m => !m.planet || cfg.includeGround));
             selected = s.markets.Find(m => m.uid == selectedUid);
             if (selected == null && s.markets.Count > 0)
             {
-                var near = new List<MarketInfo>(s.markets);
+                var near = s.markets.FindAll(m => !m.planet || cfg.includeGround);
+                if (near.Count == 0) { head.text = ""; return; }
                 near.Sort((a, b) => (a.fleetAu < 0 ? double.MaxValue : a.fleetAu).CompareTo(b.fleetAu < 0 ? double.MaxValue : b.fleetAu));
                 selected = near.Find(m => m.initialized) ?? near[0];
                 selectedUid = selected.uid;
@@ -379,7 +380,7 @@ namespace TradeHelper.Ui
         {
             base.OnSnapshot(s);
             var rows = new List<Station>();
-            foreach (var m in s.markets) rows.Add(new Station { ex = m.ex, uid = m.uid, name = m.name + (m.Discovered ? "" : "（未发现）"), fleetAu = m.fleetAu, discovered = m.Discovered });
+            foreach (var m in s.markets) if (!m.planet || cfg.includeGround) rows.Add(new Station { ex = m.ex, uid = m.uid, name = m.name + (m.Discovered ? "" : "（未发现）"), fleetAu = m.fleetAu, discovered = m.Discovered });
             table.SetData(rows);
         }
 
