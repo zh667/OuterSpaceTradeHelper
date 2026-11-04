@@ -19,12 +19,19 @@ namespace TradeHelper.Ui
             return v.ToString("0");
         }
 
-        // Same text the game shows for galaxy distances (UIUntils.distanceAu: AU, or ly above one light year).
+        public static int Unit; // Config.distanceUnit
+
+        // Route distance between galaxies. AU by default; unit 1 = the game's route panels (UIUntils.distanceAu,
+        // which switches to light years above 63,241 AU).
         public static string Dist(double au)
         {
             if (au < 0) return "?";
             if (au == 0) return "同星系";
-            try { return UIUntils.distanceAu(au); } catch { return au.ToString("0.##") + " AU"; }
+            if (Unit == 1)
+            {
+                try { return UIUntils.distanceAu(au); } catch { }
+            }
+            return au >= 1000 ? au.ToString("#,0") + " AU" : au.ToString("0.##") + " AU";
         }
 
         public static Color FreshColor(MarketInfo m) => !m.initialized ? Theme.Text2 : m.pendingDays == 0 ? Theme.Good : Theme.Warn;
@@ -60,6 +67,7 @@ namespace TradeHelper.Ui
 
         public void Build()
         {
+            Fmt.Unit = cfg.distanceUnit;
             Theme.Load();
             canvasGo = new GameObject("TradeHelperCanvas");
             UnityEngine.Object.DontDestroyOnLoad(canvasGo);

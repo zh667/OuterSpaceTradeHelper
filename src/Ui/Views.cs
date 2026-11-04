@@ -467,8 +467,10 @@ namespace TradeHelper.Ui
             y += 30;
             Kit.TxtAt(root, "放在游戏目录里不影响游戏：游戏只读取模组文件夹里的 Manifest 和程序文件，Steam 校验和更新也不删多出来的文件；更新本模组时 data 文件夹会保留。配置 config.json 和计划 plans.json 固定在 C 盘游戏数据目录。", 0, y, w.BodyW, 26, 14, Theme.Text2);
             y += 34;
-            Kit.TxtAt(root, "距离和游戏一样按星门航线算（超过 1 光年显示 ly）。“舰队→某站”= 你的舰队现在所在星系到那个站所在星系的航程。", 0, y, w.BodyW, 26, 14, Theme.Text2);
-            y += 34;
+            Drop("距离显示：", 0, y, 420, new List<string> { "AU（带千分位）", "和游戏航线界面一样（超过 1 光年显示 ly）" }, Mathf.Clamp(cfg.distanceUnit, 0, 1),
+                i => { cfg.distanceUnit = i; Fmt.Unit = i; cfg.Save(); host.PlansChanged(); });
+            Kit.TxtAt(root, "距离按星门航线算（和游戏用同一个算法）；“舰队→某站”= 舰队所在星系到那个站所在星系的航程。", 430, y, w.BodyW - 430, 30, 14, Theme.Text2);
+            y += 38;
             Kit.TxtAt(root, "性能（每 30 秒写一行到 perf.log）", 0, y, 400, 28, 17, Theme.Text);
             y += 30;
             perf = Kit.Txt(root, "", 13, Theme.Text2, TextAlignmentOptions.TopLeft);
