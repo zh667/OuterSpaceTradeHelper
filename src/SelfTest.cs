@@ -116,16 +116,32 @@ namespace TradeHelper
             Run(() => CheckSpecialResale(snap));
             Run(() => CheckSpecialSellModel(snap));
             Run(() => CheckAdvice(snap));
+            Run(() => ProbeCalls(snap));
 
             if (req.tests == "all" || req.tests.Contains("trade")) yield return Guard(TradeTest(), "real trade: buy, plan stages, sell");
 
             // A full scan from scratch, then a refresh with nothing changed.
             yield return TimedScan("fullScan", true);
             yield return TimedScan("unchangedRefresh", false);
+            // A new session's first scan, with the cache file the scans above wrote.
+            MarketScanner.SaveDiskCache();
+            MarketScanner.ClearCache(true);
+            yield return TimedScan("diskCacheScan", false);
+            result.perf["diskMarketsLoaded"] = MarketScanner.DiskMarketsLoaded;
+            Run(() =>
+            {
+                int mk, cmp, diff;
+                MarketScanner.CompareCacheWithLive(host.Latest, out mk, out cmp, out diff);
+                return new Check { name = "cache from disk = game", passed = cmp > 0 && diff == 0 && MarketScanner.DiskMarketsLoaded > 0,
+                                   summary = MarketScanner.DiskMarketsLoaded + " markets read from disk; " + mk + " markets, " + cmp + " goods compared live, " + diff + " differ" };
+            });
 
             host.SetVisible(true);
             yield return new WaitForSecondsRealtime(4);
             yield return Shot("panel");
+            host.ShowTab(1);
+            yield return new WaitForSecondsRealtime(2);
+            yield return Shot("plans");
             Finish(null);
         }
 
@@ -137,7 +153,7 @@ namespace TradeHelper
 
         IEnumerator TimedScan(string name, bool fromScratch)
         {
-            if (fromScratch) MarketScanner.ClearCache();
+            if (fromScratch) MarketScanner.ClearCache(false);
             int gc0 = GC.CollectionCount(0);
             float t = Time.realtimeSinceStartup;
             host.RequestRefresh(true);
@@ -284,7 +300,10 @@ namespace TradeHelper
             c.details.Add("after selling: " + plan.StateText + " / " + plan.doneNote + (stage3 ? " ok" : " WRONG"));
             bool creditsOk = gd.creditPoint == cp0 - payB + payS;
             c.details.Add("credits " + cp0 + " -> " + gd.creditPoint + (creditsOk ? " ok" : " WRONG"));
-            c.passed = buyOk && stage2 && sellOk && stage3 && creditsOk;
+            var route = Plans.Routes().Find(r => r.name == qb.name && r.to == plan.sellName && !r.held);
+            bool routeOk = route != null && route.count == 1 && route.units == k && SameMoney(route.profit, payS - idea.cost);
+            c.details.Add("route summary: " + (route == null ? "missing" : route.count + " time(s), " + route.units + " units, profit " + route.profit.ToString("0") + " (expected " + (payS - idea.cost).ToString("0") + ")") + (routeOk ? " ok" : " WRONG"));
+            c.passed = buyOk && stage2 && sellOk && stage3 && creditsOk && routeOk;
             c.summary = (c.passed ? "all steps match" : "some steps differ") + " (" + qb.name + " " + qb.market.name + " -> " + qs.market.name + ")";
         }
 
@@ -442,6 +461,70 @@ namespace TradeHelper
             }
             c.passed = bad == 0;
             c.summary = n + " quotes, " + bad + " off by more than 0.5%, worst " + (worst * 100).ToString("0.##") + "%";
+            return c;
+        }
+
+        // Cost of each game call the scan makes per goods (time and memory per call), and whether summing a market's
+        // sources once (RegionOf/EPoolOf/LeanOf) gives exactly the game's getEPool/getLStellar.
+        Check ProbeCalls(Snapshot snap)
+        {
+            var c = new Check { name = "per-goods call cost and region sums = game" };
+            var gd = MarketScanner.Game;
+            var probes = new Dictionary<string, double[]>(); // name -> {ticks, bytes, calls, skipped}
+            Action<string, Action> time = (name, a) =>
+            {
+                double[] v; if (!probes.TryGetValue(name, out v)) probes[name] = v = new double[4];
+                int g0 = GC.CollectionCount(0); long m0 = GC.GetTotalMemory(false); long t0 = Perf.Now;
+                a();
+                long t1 = Perf.Now; long m1 = GC.GetTotalMemory(false);
+                v[0] += t1 - t0; v[2]++;
+                if (GC.CollectionCount(0) == g0) v[1] += Math.Max(0, m1 - m0); else v[3]++;
+            };
+            int n = 0, badPool = 0, badLean = 0, markets = 0;
+            int snapReadable = 0, snapRaw = 0, snapMissing = 0, snapPoolSame = 0, snapPoolDiff = 0, snapLeanSame = 0, snapLeanDiff = 0;
+            foreach (var m in snap.markets)
+            {
+                if (!m.Exact || m.ex == null) continue;
+                markets++;
+                MarketScanner.Region r = null;
+                time("RegionOf (once per market)", () => r = MarketScanner.RegionOf(m.ex, gd));
+                foreach (var it in new List<FWExchangeSpaceGoods>(m.ex.itemList))
+                {
+                    if (it == null || it.GoodID == null) continue;
+                    n++;
+                    float a = 0, b = 0, la = 0, lb = 0;
+                    time("game getEPool", () => a = m.ex.getEPool(it.GoodID));
+                    time("EPoolOf", () => b = MarketScanner.EPoolOf(r, it.GoodID));
+                    time("game getLStellar", () => la = it.getLStellar());
+                    time("LeanOf", () => lb = MarketScanner.LeanOf(r, it.GoodID));
+                    time("getGoodsDef", () => it.getGoodsDef());
+                    time("event price", () => FWGalaxyEventTradeEffects.Get(m.ex.uid, it.GoodID));
+                    // The market's economics snapshot for its latest revision (what settlement computed).
+                    FWExchangeEconomicDaySnapshot es = null;
+                    if (m.ex.economicRevisions != null) m.ex.economicRevisions.TryGetValue(m.ex.latestEconomicRevision, out es);
+                    if (es == null) snapMissing++;
+                    else if (es.goods == null) snapRaw++;
+                    else
+                    {
+                        snapReadable++;
+                        float sp = float.NaN, sl = float.NaN;
+                        time("snapshot Get", () => { try { sp = es.Get(it.GoodID, 0); sl = es.Get(it.GoodID, 3); } catch { } });
+                        if (sp == a) snapPoolSame++; else { snapPoolDiff++; if (c.details.Count < 12) c.details.Add("snapshot EPool " + m.name + " " + it.GoodID + ": live " + a + " snapshot " + sp); }
+                        if (sl == la) snapLeanSame++; else { snapLeanDiff++; if (c.details.Count < 12) c.details.Add("snapshot leaning " + m.name + " " + it.GoodID + ": live " + la + " snapshot " + sl); }
+                    }
+                    if (a != b) { badPool++; if (c.details.Count < 8) c.details.Add("EPool " + m.name + " " + it.GoodID + ": game " + a + " sum " + b); }
+                    if (la != lb) { badLean++; if (c.details.Count < 8) c.details.Add("Leaning " + m.name + " " + it.GoodID + ": game " + la + " sum " + lb); }
+                }
+            }
+            foreach (var kv in probes)
+            {
+                var v = kv.Value;
+                c.details.Add(kv.Key + ": " + (Perf.Ms((long)v[0]) * 1000 / Math.Max(1, v[2])).ToString("0.0") + " us, " + (v[1] / Math.Max(1, v[2] - v[3])).ToString("0") + " B per call, total " + Perf.Ms((long)v[0]).ToString("0") + " ms over " + v[2] + " calls");
+            }
+            c.passed = n > 0 && badPool == 0 && badLean == 0;
+            c.summary = markets + " markets, " + n + " goods; EPool differs " + badPool + ", leaning differs " + badLean
+                        + " | snapshot readable " + snapReadable + " raw " + snapRaw + " missing " + snapMissing
+                        + "; EPool same " + snapPoolSame + " diff " + snapPoolDiff + "; leaning same " + snapLeanSame + " diff " + snapLeanDiff;
             return c;
         }
 

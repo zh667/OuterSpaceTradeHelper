@@ -133,6 +133,12 @@ def main():
     ap.add_argument("--refresh-runtime", action="store_true")
     a = ap.parse_args()
 
+    # One test copy at a time (the original game, started from Steam, is not counted).
+    ps = subprocess.run(["powershell", "-NoProfile", "-Command",
+                         "Get-Process -Name 'Outer Space' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path"],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
+    if str(RUNTIME).lower() in ps.lower():
+        sys.exit("a test copy of the game is already running")
     copy_game(a.refresh_runtime)
     patch_product_name()
     patch_app_info()
