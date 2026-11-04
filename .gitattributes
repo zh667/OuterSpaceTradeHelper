@@ -1,0 +1,4 @@
+# Text files are LF on every host (sources are written on the VPS and built on Windows).
+* text=auto eol=lf
+*.dll binary
+*.png binary

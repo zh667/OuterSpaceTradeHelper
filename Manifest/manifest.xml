@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModXmlManifest>
+  <packageId>zh6657.tradehelper</packageId>
+  <name>跑商助手</name>
+  <author>zh6657</author>
+  <desc>空间站实时价格、税率、库存一览；汇总基地/母舰/舰队库存；给出扣税后的跑商与卖货建议；可选择让指定空间站在后台补算市场。热键 F8。只读游戏数据，只有“后台补算”会推进你选中的站的市场结算（等于替你打开了那个站）。</desc>
+  <versions>
+    <ModMetaVersion>
+      <version>v_common</version>
+      <main>TradeHelper.dll</main>
+    </ModMetaVersion>
+  </versions>
+</ModXmlManifest>
