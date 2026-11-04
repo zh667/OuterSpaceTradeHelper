@@ -25,7 +25,7 @@ namespace TradeHelper
 
         static string N(double v) => double.IsNaN(v) || double.IsInfinity(v) ? "null" : Math.Round(v, 2).ToString(CultureInfo.InvariantCulture);
 
-        public static string Write(Snapshot snap, List<TradeIdea> ideas, List<SellIdea> sells)
+        public static string Write(Snapshot snap, List<TradeIdea> ideas, List<SellIdea> sells, string dir)
         {
             var sb = new StringBuilder();
             sb.Append("{\"version\":").Append(S(TradeHelperBehaviour.Version))
@@ -40,7 +40,7 @@ namespace TradeHelper
                 sb.Append("{\"uid\":").Append(m.uid).Append(",\"name\":").Append(S(m.name))
                   .Append(",\"galaxyId\":").Append(S(m.galaxyId)).Append(",\"planet\":").Append(m.planet ? "true" : "false")
                   .Append(",\"initialized\":").Append(m.initialized ? "true" : "false")
-                  .Append(",\"pendingDays\":").Append(m.pendingDays).Append(",\"tax\":").Append(N(m.tax))
+                  .Append(",\"pendingDays\":").Append(m.pendingDays).Append(",\"tax\":").Append(N(m.tax)).Append(",\"fleetAu\":").Append(N(m.fleetAu))
                   .Append(",\"goods\":[");
                 bool f2 = true;
                 foreach (var q in m.goods)
@@ -52,8 +52,8 @@ namespace TradeHelper
                       .Append(",\"contraband\":").Append(q.contraband ? "true" : "false")
                       .Append(",\"exact\":").Append(q.exact ? "true" : "false")
                       .Append(",\"tax\":").Append(N(q.tax))
-                      .Append(",\"buy1\":").Append(N(q.BuyUnit(0) * (1 + q.tax)))
-                      .Append(",\"sell1\":").Append(N(q.SellUnit(0) * (1 - q.tax))).Append('}');
+                      .Append(",\"buy1\":").Append(N(q.buy1))
+                      .Append(",\"sell1\":").Append(N(q.sell1)).Append('}');
                 }
                 sb.Append("]}");
             }
@@ -79,7 +79,7 @@ namespace TradeHelper
                 sb.Append("{\"name\":").Append(S(t.name)).Append(",\"buy\":").Append(S(t.buy.market.name))
                   .Append(",\"sell\":").Append(S(t.sell.market.name)).Append(",\"qty\":").Append(t.qty)
                   .Append(",\"cost\":").Append(N(t.cost)).Append(",\"revenue\":").Append(N(t.revenue))
-                  .Append(",\"profit\":").Append(N(t.Profit)).Append(",\"distance\":").Append(N(t.legDistance)).Append('}');
+                  .Append(",\"profit\":").Append(N(t.Profit)).Append(",\"legAu\":").Append(N(t.legAu)).Append(",\"fleetAu\":").Append(N(t.fleetAu)).Append(",\"stale\":").Append(t.Stale ? "true" : "false").Append('}');
             }
             sb.Append("],\"sells\":[");
             first = true;
@@ -92,8 +92,8 @@ namespace TradeHelper
             sb.Append("],\"errors\":[");
             for (int i = 0; i < snap.errors.Count; i++) { if (i > 0) sb.Append(','); sb.Append(S(snap.errors[i])); }
             sb.Append("]}");
-            Directory.CreateDirectory(Config.Dir);
-            var path = Path.Combine(Config.Dir, "latest.json");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "latest.json");
             File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
             return path;
         }
