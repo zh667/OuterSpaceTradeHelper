@@ -117,6 +117,7 @@ namespace TradeHelper
             Run(() => CheckSpecialSellModel(snap));
             Run(() => CheckAdvice(snap));
             Run(() => ProbeCalls(snap));
+            Run(() => StationPlaces());
 
             if (req.tests == "all" || req.tests.Contains("trade")) yield return Guard(TradeTest(), "real trade: buy, plan stages, sell");
 
@@ -142,6 +143,9 @@ namespace TradeHelper
             host.ShowTab(1);
             yield return new WaitForSecondsRealtime(2);
             yield return Shot("plans");
+            host.ShowTab(3);
+            yield return new WaitForSecondsRealtime(2);
+            yield return Shot("markets");
             Finish(null);
         }
 
@@ -525,6 +529,36 @@ namespace TradeHelper
             c.summary = markets + " markets, " + n + " goods; EPool differs " + badPool + ", leaning differs " + badLean
                         + " | snapshot readable " + snapReadable + " raw " + snapRaw + " missing " + snapMissing
                         + "; EPool same " + snapPoolSame + " diff " + snapPoolDiff + "; leaning same " + snapLeanSame + " diff " + snapLeanDiff;
+            return c;
+        }
+
+        // Trade stations of every known galaxy with the nearest planet (to choose what "beside a planet" means).
+        Check StationPlaces()
+        {
+            var c = new Check { name = "trade stations and nearest planets", info = true, passed = true };
+            var gd = MarketScanner.Game;
+            int n = 0;
+            foreach (var g in gd.galaxyBlock.knownGalaxies)
+            {
+                if (g == null || g.exchangeSpace == null) continue;
+                string gname; try { gname = g.getName(); } catch { gname = g.id; }
+                var planets = new List<string>();
+                if (g.stars != null) foreach (var st in g.stars) if (st != null) planets.Add(MarketScanner.PlanetName(st) + "(r" + st.r.ToString("0") + ")");
+                var places = MarketScanner.TradeStations(gd, g);
+                foreach (var p in places)
+                {
+                    n++;
+                    c.details.Add(gname + " | " + p.name + " pos(" + p.pos.x.ToString("0") + "," + p.pos.y.ToString("0") + ") |" + p.pos.magnitude.ToString("0") + "| nearest " + p.planet + " d=" + p.distance.ToString("0") + " planetR=" + p.planetR.ToString("0"));
+                }
+                if (places.Count == 0) c.details.Add(gname + " | no trade station");
+                if (c.details.Count < 400) c.details.Add("  planets: " + string.Join(", ", planets));
+            }
+            c.summary = n + " trade stations";
+            foreach (var m in host.Latest.markets)
+                if (!m.planet && (m.name.StartsWith("寂幕旋区") || m.name.StartsWith("碧云转接") || m.name.StartsWith("库汇域")))
+                    c.details.Insert(0, "market: " + m.name + " | " + m.placeShort + " | " + m.where);
+            int bad = host.Latest.markets.FindAll(m => !m.planet && !m.name.Contains("·")).Count;
+            if (bad > 0) { c.passed = false; c.details.Insert(0, bad + " galaxy markets without a station name"); }
             return c;
         }
 
