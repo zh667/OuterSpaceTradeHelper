@@ -501,7 +501,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                     GoodsQuote q;
                     if (!m.byGid.TryGetValue(p.gid, out q) || q.contraband) continue;
                     if (m.planet && !cfg.includeGround) continue;
-                    if (!m.Discovered && !cfg.includeUndiscovered) continue;
+                    if (!m.Explored && !cfg.includeUndiscovered) continue;
                     if (hold <= 0) continue;
                     // At its own sell station the plan keeps its queue place; anywhere else every other plan selling the same
                     // goods there is counted as selling first (the cautious case).

@@ -141,6 +141,7 @@ namespace TradeHelper
             Run(() => CheckSpecialResale(snap));
             Run(() => CheckSpecialSellModel(snap));
             Run(() => CheckAdvice(snap));
+            Run(() => CheckExploration(snap));
             Run(() => ProbeCalls(snap));
             Run(() => StationPlaces());
 
@@ -473,7 +474,9 @@ namespace TradeHelper
             // "现在最好卖到 / 比计划": selling at the plan's own market gives the plan's current profit, and the best market
             // is at least as good.
             var own = plan.alternatives.Find(a => a.Key != null && a.Key.uid == plan.sellUid);
-            bool bestOk = plan.alternatives.Count > 0 && !double.IsNaN(plan.BestProfit) && plan.BestProfit >= plan.CurProfit - 2
+            bool ownCounted = plan.sellMarket != null && (plan.sellMarket.Explored || host.Cfg.includeUndiscovered);
+            bool bestOk = plan.alternatives.Count > 0 && !double.IsNaN(plan.BestProfit) && (!ownCounted || plan.BestProfit >= plan.CurProfit - 2)
+                          && plan.alternatives.TrueForAll(a => a.Key.Explored || host.Cfg.includeUndiscovered)
                           && (own.Key == null || SameMoney(plan.ProfitIfSoldFor(own.Value), plan.CurProfit));
             c.details.Add("best market now: " + (plan.alternatives.Count > 0 ? plan.alternatives[0].Key.name : "none") + ", profit " + plan.BestProfit.ToString("0")
                           + " vs plan " + plan.PlanProfit.ToString("0") + " / at the plan's market " + plan.CurProfit.ToString("0")
@@ -789,7 +792,7 @@ namespace TradeHelper
                 if (t.buy.market.planet || t.sell.market.planet) why = "ground market";
                 else if (t.buy.contraband || t.sell.contraband) why = "contraband";
                 else if (t.Profit <= 0) why = "no profit";
-                else if (!t.buy.market.Discovered || !t.sell.market.Discovered) why = "undiscovered";
+                else if (!t.buy.market.Explored || !t.sell.market.Explored) why = "not explored";
                 if (why != null) { bad++; if (c.details.Count < 10) c.details.Add(why + ": " + t.name + " " + t.buy.market.name + " -> " + t.sell.market.name); }
             }
             for (int i = 0; i < Math.Min(5, snap.trades.Count); i++)
@@ -797,8 +800,40 @@ namespace TradeHelper
                 var t = snap.trades[i];
                 c.details.Add("top " + (i + 1) + ": " + t.name + " x" + t.qty + " " + t.buy.market.name + " -> " + t.sell.market.name + " profit " + t.Profit.ToString("0"));
             }
+            foreach (var s in snap.sells)
+            {
+                string why = null;
+                if (s.market.market.planet) why = "ground market";
+                else if (s.market.contraband) why = "contraband";
+                else if (!s.market.market.Explored) why = "not explored";
+                if (why != null) { bad++; if (c.details.Count < 15) c.details.Add("sell " + why + ": " + s.name + " -> " + s.market.market.name); }
+            }
             c.passed = bad == 0;
             c.summary = snap.trades.Count + " trade ideas, " + snap.sells.Count + " sell ideas, " + bad + " break the rules";
+            return c;
+        }
+
+        // Every market's exploration state is the game's (GalaxyExplorationService), and the markets of galaxies only
+        // discovered on the map are named, since advice leaves them out.
+        Check CheckExploration(Snapshot snap)
+        {
+            var c = new Check { name = "exploration state = game" };
+            var gd = MarketScanner.Game;
+            int[] count = new int[3];
+            int differ = 0;
+            var discoveredOnly = new List<string>();
+            foreach (var m in snap.markets)
+            {
+                if (m.planet) continue;
+                var level = Script.FreeWorldAirShip.Galaxy.Exploration.GalaxyExplorationService.GetGalaxyLevel(gd, m.galaxyId);
+                int want = level >= GalaxyKnowledgeLevel.Visited ? 2 : level >= GalaxyKnowledgeLevel.Detected ? 1 : 0;
+                if (m.observe < 0 || m.observe > 2 || m.observe != want) { differ++; if (c.details.Count < 10) c.details.Add("differs: " + m.name + " mod " + m.observe + " game " + level); continue; }
+                count[want]++;
+                if (want == 1) discoveredOnly.Add(m.name);
+            }
+            c.details.Add("discovered on the map but not explored: " + (discoveredOnly.Count == 0 ? "none" : string.Join("、", discoveredOnly)));
+            c.passed = differ == 0;
+            c.summary = "explored " + count[2] + ", discovered only " + count[1] + ", not discovered " + count[0] + "; " + differ + " differ from the game";
             return c;
         }
 

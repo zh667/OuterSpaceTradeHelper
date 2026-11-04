@@ -38,7 +38,7 @@ namespace TradeHelper
         static bool Usable(GoodsQuote q, Config cfg)
         {
             if (q == null || q.contraband) return false;
-            if (!q.market.Discovered && !cfg.includeUndiscovered) return false;
+            if (!q.market.Explored && !cfg.includeUndiscovered) return false;
             if (q.market.planet && !cfg.includeGround) return false;
             if (!q.market.Exact && q.market.pendingDays > cfg.maxStaleDays) return false;
             return true;
