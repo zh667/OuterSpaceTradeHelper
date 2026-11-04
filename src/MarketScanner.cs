@@ -130,7 +130,7 @@ namespace TradeHelper
         // Totals: normal goods in an up-to-date market use the game's own quote (exact); otherwise the model above.
         public double BuyCost(int k)
         {
-            if (exact && normal != null)
+            if (exact && normal != null && StillExact())
             {
                 try { return normal.QuoteTrade(-k).rawPrice * (1 + tax); } catch { }
             }
@@ -143,7 +143,7 @@ namespace TradeHelper
         public double SellHeld(int from, int k, List<FWBaseBean> items)
         {
             if (k <= 0) return 0;
-            if (special && exact && specialGoods != null && items != null && from + k <= items.Count)
+            if (special && exact && specialGoods != null && items != null && from + k <= items.Count && StillExact())
             {
                 try
                 {
@@ -158,9 +158,18 @@ namespace TradeHelper
             return SellRevenue(from + k) - (from > 0 ? SellRevenue(from) : 0);
         }
 
+        // The game's quote functions settle a market that owes days (EnsureSettledForUse). A quote marked exact at scan
+        // time is only asked live while its market still owes nothing and is not on the game's worker thread.
+        bool StillExact()
+        {
+            var ex = market?.ex;
+            if (ex == null || ex.uid == Settlement.inFlightUid) return false;
+            try { return !ex.hasPendingSettlement(); } catch { return false; }
+        }
+
         public double SellRevenue(int k)
         {
-            if (exact && normal != null)
+            if (exact && normal != null && StillExact())
             {
                 try { return normal.QuoteTrade(k).rawPrice * (1 - tax); } catch { }
             }
@@ -582,9 +591,22 @@ namespace TradeHelper
                 snap.marketsDone++;
                 var m = kv.Value;
                 snap.phase = "读站 " + m.name;
+                MarketInfo old;
+                // Being settled on the game's worker thread: do not read it now; keep what the last scan had.
+                if (kv.Key.uid == Settlement.inFlightUid)
+                {
+                    if (prevByUid.TryGetValue(m.uid, out old) && old.ex == kv.Key)
+                    {
+                        old.name = m.name; old.observe = m.observe; old.starId = m.starId; old.star = m.star;
+                        SetWhere(old, snap);
+                        old.fleetAu = snap.RouteAu(snap.fleetGalaxyId, old.galaxyId);
+                        snap.markets.Add(old);
+                        snap.marketsReused++;
+                    }
+                    continue;
+                }
                 long fp = 0;
                 try { fp = Fingerprint(kv.Key); } catch { fp = 0; }
-                MarketInfo old;
                 if (fp != 0 && prevByUid.TryGetValue(m.uid, out old) && old.fingerprint == fp && old.ex == kv.Key)
                 {
                     MarketCache omc;

@@ -325,7 +325,7 @@ namespace TradeHelper.Ui
 
         string State(Station s)
         {
-            if (host.settlement.currentUid == s.uid) return "补算中 · 剩" + host.settlement.currentLeft + "天";
+            if (host.settlement.currentUid == s.uid) return "后台补算中 · " + host.settlement.currentLeft + "天";
             if (host.settlement.IsQueued(s.uid)) return "排队中";
             if (host.settlement.IsCancelled(s.uid) && cfg.keepFresh.Contains(s.uid)) return "已取消（本次不自动补）";
             if (!s.Initialized) return s.Pending > 0 ? "未开过 · 欠" + s.Pending + "天" : "未开过";
@@ -426,9 +426,7 @@ namespace TradeHelper.Ui
             hk.text = cfg.hotkey;
             Kit.Button(root, "保存", 518, y, 80, 30, () => { if (!string.IsNullOrEmpty(hk.text)) { cfg.hotkey = hk.text.Trim(); cfg.Save(); } });
             y += 42;
-            int di = Array.IndexOf(DayOpts, cfg.daysPerFrame);
-            Drop("后台补算速度：", 0, y, 420, new List<string> { "每帧 1 天（最平滑）", "每帧 2 天", "每帧 3 天", "每帧 5 天", "每帧 10 天（最快，可能掉帧）" }, di < 0 ? 0 : di,
-                i => { cfg.daysPerFrame = DayOpts[i]; cfg.Save(); });
+            Kit.TxtAt(root, "后台补算：和你打开空间站交易所一样，交给游戏自己的后台线程算，一次一个站，不占游戏主画面的帧。", 0, y, 900, 30, 15, Theme.Text2);
             y += 42;
             int ri = Array.IndexOf(RefreshOpts, cfg.autoRefreshSeconds);
             Drop("面板打开时自动刷新：", 0, y, 420, new List<string> { "每 15 秒", "每 30 秒", "每 60 秒", "每 2 分钟", "不自动刷新" }, ri < 0 ? 1 : ri,

@@ -4,10 +4,10 @@ using UnityEngine;
 
 namespace TradeHelper
 {
-    // Background market catch-up for the stations the player picked. Uses the game's own bounded entry point
-    // FWExchangeSpace.ReleasePendingSettlementBatch: the same work as opening the station's exchange, spread over
-    // frames. A never-opened market builds its store inside the first settled day (FWExchangeSpace.settleNextDay
-    // calls initializeStore); one that owes no days is initialised with GetItemsForUse, like opening it.
+    // Background market catch-up for the stations the player picked. Each market is handed to the game's own
+    // FWExchangeSpace.ensureStoreInitializedAsync, exactly what opening its exchange does ("贸易数据通讯中"): the game
+    // settles every owed day and builds a never-opened store on a worker thread (one market at a time), then calls back
+    // on the main thread. The next market starts after the callback.
     public class Settlement
     {
         readonly Queue<long> queue = new Queue<long>();
@@ -15,6 +15,14 @@ namespace TradeHelper
         public string lastError;
         public int daysDoneTotal, marketsDone;
         public long currentUid = -1;
+        // The market the game is settling on its worker thread right now (-1: none). The scanner leaves it alone.
+        public static long inFlightUid = -1;
+        static FWExchangeSpace inFlightEx;
+        static int inFlightDays;
+        static float inFlightSince;
+        static volatile bool inFlightDone;
+        static Exception inFlightError;
+        public bool InFlight => inFlightUid >= 0;
         public int currentLeft;
         float nextKeepCheck;
         public bool paused;
@@ -41,7 +49,8 @@ namespace TradeHelper
             var keep = new List<long>();
             foreach (var id in queue)
             {
-                if (which(id)) { queued.Remove(id); suppressed.Add(id); n++; if (id == currentUid) { currentUid = -1; currentLeft = 0; } }
+                // The market already on the game's worker thread finishes its catch-up; the rest are dropped.
+                if (which(id)) { queued.Remove(id); suppressed.Add(id); n++; if (id == currentUid && id != inFlightUid) { currentUid = -1; currentLeft = 0; } }
                 else keep.Add(id);
             }
             queue.Clear();
@@ -55,6 +64,7 @@ namespace TradeHelper
         public void Clear()
         {
             queue.Clear(); queued.Clear(); suppressed.Clear(); currentUid = -1; currentLeft = 0;
+            inFlightUid = -1; inFlightEx = null;
         }
 
         static FWExchangeSpace Find(FWGameData gd, long uid)
@@ -86,6 +96,7 @@ namespace TradeHelper
                         if (pending || !ex.storeInitialized) { if (queued.Add(ex.uid)) queue.Enqueue(ex.uid); }
                     }
             }
+            if (inFlightUid >= 0) { WatchInFlight(gd); return; }
             if (paused || queue.Count == 0) return;
             long id = queue.Peek();
             var target = Find(gd, id);
@@ -93,37 +104,52 @@ namespace TradeHelper
             currentUid = id;
             try
             {
-                int left = PendingOf(target);
-                currentLeft = left;
-                if (left == 0)
-                {
-                    if (!target.storeInitialized) target.GetItemsForUse(); // nothing owed: build the store like opening it
-                    Finish(id);
-                    return;
-                }
-                long t0 = Perf.Now;
-                int done = target.ReleasePendingSettlementBatch(Math.Max(1, cfg.daysPerFrame), Math.Max(1.0, cfg.msPerFrame), false);
-                Perf.settleMsTotal += Perf.Ms(Perf.Now - t0);
-                Perf.settledDays += done;
-                daysDoneTotal += done;
                 currentLeft = PendingOf(target);
-                if (currentLeft == 0)
-                {
-                    if (!target.storeInitialized) target.GetItemsForUse();
-                    Finish(id);
-                }
-                else if (done == 0)
-                {
-                    // No progress this frame (e.g. the world clock is mid-advance): move it to the back.
-                    queue.Dequeue(); queue.Enqueue(id);
-                }
+                if (currentLeft == 0 && target.storeInitialized) { Finish(id); return; }
+                inFlightUid = id; inFlightEx = target; inFlightDays = currentLeft; inFlightSince = Time.unscaledTime;
+                inFlightDone = false; inFlightError = null;
+                long t0 = Perf.Now;
+                target.ensureStoreInitializedAsync(ex => { inFlightDone = true; }, e => { inFlightError = e; inFlightDone = true; });
+                Perf.settleMsTotal += Perf.Ms(Perf.Now - t0);
             }
             catch (Exception e)
             {
                 lastError = DateTime.Now.ToString("HH:mm:ss") + " " + e.GetType().Name + ": " + e.Message;
                 Debug.LogWarning("[TradeHelper] settlement uid=" + id + " failed: " + e);
+                inFlightUid = -1;
                 Drop();
             }
+        }
+
+        // The market on the game's worker thread: wait for its callback; if none comes (e.g. the trade session changed),
+        // look at the market itself after a while.
+        void WatchInFlight(FWGameData gd)
+        {
+            bool done = inFlightDone;
+            if (!done && Time.unscaledTime - inFlightSince > 20f)
+            {
+                try { done = !inFlightEx.hasPendingSettlement() && inFlightEx.storeInitialized; } catch { }
+            }
+            if (!done && Time.unscaledTime - inFlightSince > 900f)
+            {
+                lastError = DateTime.Now.ToString("HH:mm:ss") + " 后台补算超过 15 分钟没有结束，已跳过";
+                done = true;
+            }
+            if (!done) return;
+            long id = inFlightUid;
+            inFlightUid = -1; inFlightEx = null;
+            if (inFlightError != null)
+            {
+                lastError = DateTime.Now.ToString("HH:mm:ss") + " " + inFlightError.GetType().Name + ": " + inFlightError.Message;
+                Debug.LogWarning("[TradeHelper] settlement uid=" + id + " failed: " + inFlightError);
+            }
+            else
+            {
+                Perf.settledDays += inFlightDays;
+                daysDoneTotal += inFlightDays;
+            }
+            if (queue.Count > 0 && queue.Peek() == id) Finish(id);
+            else { marketsDone++; currentUid = -1; currentLeft = 0; try { MarketFinished?.Invoke(id); } catch { } }
         }
 
         void Finish(long id)
