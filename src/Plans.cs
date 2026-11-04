@@ -80,6 +80,10 @@ namespace TradeHelper
         // How many of each tracked goods the player held at the last look; changes are handed to plans (see Track).
         static Dictionary<string, int> lastOwned = new Dictionary<string, int>();
         static object baselineGame;
+        // Store size of each tracked goods in every market at the last look ("uid|gid"). Selling special goods (fleet
+        // wings, creatures...) leaves no trade record in the game (the checkout only puts the items back into the
+        // store), so the market whose store grew tells where they went.
+        static Dictionary<string, int> lastStock = new Dictionary<string, int>();
         // Bumped whenever the set of plans or a plan's stage changes (advice depends on it; history points do not).
         public static int version;
         static string Path => System.IO.Path.Combine(Config.Dir, "plans.json");
@@ -365,7 +369,20 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                     PlayerSales(m, p.gid, since, out units, out paid);
                     if (units > 0) { where = m.name; break; }
                 }
-                p.doneNote = where != null ? "在 " + where + " 卖出（不是计划的站）" : "库存里这批货没了，没找到卖出记录（可能挪到了别处）";
+                // No trade record: look for the store that grew (special goods).
+                MarketInfo grew = null; int best = 0;
+                if (where == null)
+                    foreach (var m in snap.markets)
+                    {
+                        GoodsQuote q; int before;
+                        if (!m.byGid.TryGetValue(p.gid, out q) || !q.special || !lastStock.TryGetValue(m.uid + "|" + p.gid, out before)) continue;
+                        int grown = q.stock - before;
+                        if (grown > best || (grown == best && grown > 0 && m.uid == p.sellUid)) { best = grown; grew = m; }
+                    }
+                if (where != null) p.doneNote = "在 " + where + " 卖出（不是计划的站）";
+                else if (grew != null && grew.uid == p.sellUid) p.doneNote = "在计划的 " + grew.name + " 卖出（按该站库存增加 " + best + " 个判断）";
+                else if (grew != null) p.doneNote = "在 " + grew.name + " 卖出（不是计划的站，按该站库存增加 " + best + " 个判断）";
+                else p.doneNote = "库存里这批货没了，各站都没有对应的卖出记录或库存增加（可能挪到了别处）";
             }
             ReleaseKeepFresh(p, cfg);
             cfg.Save();
@@ -484,7 +501,22 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                     }
                 }
             }
+            RememberStock(snap);
             if (changed) Save();
+        }
+
+        static void RememberStock(Snapshot snap)
+        {
+            lastStock.Clear();
+            var gids = new HashSet<string>();
+            foreach (var p in list) if (p.state != 2 && p.gid != null) gids.Add(p.gid);
+            if (gids.Count == 0) return;
+            foreach (var m in snap.markets)
+                foreach (var gid in gids)
+                {
+                    GoodsQuote q;
+                    if (m.byGid.TryGetValue(gid, out q)) lastStock[m.uid + "|" + gid] = q.stock;
+                }
         }
     }
 }
