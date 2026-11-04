@@ -31,7 +31,6 @@ namespace TradeHelper
     public static class Advisor
     {
         const int MaxSpecialUnits = 40;
-        const int GoodsPerStep = 25;
 
         // Contraband is never offered (the game refuses both buying and selling it). Stale markets are included
         // only when the player allows them; every row shows how stale its markets are.
@@ -54,10 +53,10 @@ namespace TradeHelper
                     l.Add(q);
                 }
             var ideas = new List<TradeIdea>();
-            int n = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             foreach (var kv in byGid)
             {
-                if (++n % GoodsPerStep == 0) yield return null;
+                if (Budget.Over) { Budget.tTrades += System.Diagnostics.Stopwatch.GetTimestamp() - t0; yield return null; t0 = System.Diagnostics.Stopwatch.GetTimestamp(); }
                 var l = kv.Value;
                 if (l.Count < 2) continue;
                 var buys = l.FindAll(q => q.buyable && q.stock > 0);
@@ -83,28 +82,29 @@ namespace TradeHelper
             }
             ideas.Sort((a, b) => b.Profit.CompareTo(a.Profit));
             snap.trades = ideas;
+            Budget.tTrades += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
         }
 
+        // The marginal profit of the i-th unit (sell price after tax minus buy price with tax) never increases with
+        // i: buying lowers the seller's stock (price up) and selling raises the buyer's stock (price down). So the best
+        // quantity is the last unit whose marginal profit is still positive; a binary search finds exactly the same
+        // quantity as walking unit by unit.
         static TradeIdea BestQuantity(GoodsQuote b, GoodsQuote s)
         {
             int maxUnits = b.special ? Math.Min(b.stock, MaxSpecialUnits) : b.stock;
-            int step = b.special ? 1 : Math.Max(1, (int)Math.Max(1, Math.Min(b.depth, s.depth) / 10));
-            double cost = 0, rev = 0, bestProfit = 0; int bestQ = 0;
-            int i = 0;
-            while (i < maxUnits)
+            if (maxUnits <= 0) return null;
+            Func<int, double> marg = i => s.SellUnit(i) * (1 - s.tax) - b.BuyUnit(i) * (1 + b.tax);
+            if (marg(0) <= 0) return null;
+            int lo = 0, hi = maxUnits - 1;
+            while (lo < hi)
             {
-                int k = Math.Min(step, maxUnits - i);
-                double c = 0, r = 0;
-                for (int j = 0; j < k; j++) { c += b.BuyUnit(i + j); r += s.SellUnit(i + j); }
-                cost += c * (1 + b.tax); rev += r * (1 - s.tax);
-                i += k;
-                if (rev - cost > bestProfit) { bestProfit = rev - cost; bestQ = i; }
-                else if (r * (1 - s.tax) < c * (1 + b.tax)) break; // this chunk already loses money
+                int mid = lo + (hi - lo + 1) / 2;
+                if (marg(mid) > 0) lo = mid; else hi = mid - 1;
             }
-            if (bestQ <= 0) return null;
-            var idea = new TradeIdea { gid = b.gid, buy = b, sell = s, qty = bestQ };
-            idea.cost = b.BuyCost(bestQ);       // exact game quote when the market is up to date
-            idea.revenue = s.SellRevenue(bestQ);
+            int q = lo + 1;
+            var idea = new TradeIdea { gid = b.gid, buy = b, sell = s, qty = q };
+            idea.cost = b.BuyCost(q);       // exact game quote when the market is up to date
+            idea.revenue = s.SellRevenue(q);
             return idea;
         }
 
@@ -121,10 +121,10 @@ namespace TradeHelper
                     where[kv.Key] = string.IsNullOrEmpty(w) ? loc.name : (w.Contains(loc.name) ? w : w + "、" + loc.name);
                 }
             var res = new List<SellIdea>();
-            int n = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             foreach (var kv in total)
             {
-                if (++n % GoodsPerStep == 0) yield return null;
+                if (Budget.Over) { Budget.tSells += System.Diagnostics.Stopwatch.GetTimestamp() - t0; yield return null; t0 = System.Diagnostics.Stopwatch.GetTimestamp(); }
                 string gid;
                 if (!snap.itemKeyToGid.TryGetValue(kv.Key, out gid)) continue;
                 SellIdea best = null;
@@ -135,22 +135,20 @@ namespace TradeHelper
                     double first = q.sell1;
                     if (first <= 0) continue;
                     int maxUnits = q.special ? Math.Min(kv.Value, MaxSpecialUnits) : kv.Value;
-                    int step = q.special ? 1 : Math.Max(1, (int)(q.depth / 10));
-                    double rev = 0; int sold = 0;
-                    while (sold < maxUnits)
+                    // Unit price only falls as we sell, so find the last unit still worth at least half the first.
+                    int lo = 0, hi = maxUnits - 1;
+                    while (lo < hi)
                     {
-                        int k = Math.Min(step, maxUnits - sold);
-                        double u = q.SellUnit(sold + k - 1) * (1 - q.tax);
-                        if (u < first * 0.5) break;
-                        for (int j = 0; j < k; j++) rev += q.SellUnit(sold + j) * (1 - q.tax);
-                        sold += k;
+                        int mid = lo + (hi - lo + 1) / 2;
+                        if (q.SellUnit(mid) * (1 - q.tax) >= first * 0.5) lo = mid; else hi = mid - 1;
                     }
+                    int sold = lo + 1;
+                    double rev = q.SellRevenue(sold);
                     if (sold <= 0) continue;
                     if (best == null || rev > best.revenue)
                         best = new SellIdea { key = kv.Key, have = kv.Value, qty = sold, market = q, revenue = rev, firstUnitNet = first };
                 }
                 if (best == null) continue;
-                best.revenue = best.market.SellRevenue(best.qty); // exact game quote when possible
                 best.name = MarketScanner.ItemName(snap, kv.Key);
                 best.category = best.market.category;
                 best.location = where[kv.Key];
@@ -159,6 +157,7 @@ namespace TradeHelper
             }
             res.Sort((a, b) => b.revenue.CompareTo(a.revenue));
             snap.sells = res;
+            Budget.tSells += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
         }
     }
 }

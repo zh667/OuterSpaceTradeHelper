@@ -63,6 +63,23 @@ namespace TradeHelper
             return NormalAt(stock + i + 0.5, pressure - i - 0.5);
         }
 
+        // Sum of k unit prices. Special goods (at most a few dozen units) are summed unit by unit. Normal goods can be
+        // tens of thousands of units: they are summed in runs of depth/500 units priced at the run's midpoint; the price
+        // changes by under 0.2% across such a run, so the total differs from the unit-by-unit sum by far less than that.
+        double SumUnits(int k, bool buying)
+        {
+            double sum = 0;
+            int run = special ? 1 : Math.Max(1, (int)(depth / 500));
+            for (int i = 0; i < k; i += run)
+            {
+                int n = Math.Min(run, k - i);
+                double mid = i + (n - 1) / 2.0;
+                if (special) sum += buying ? BuyUnit(i) : SellUnit(i);
+                else sum += n * (buying ? NormalAt(stock - mid - 0.5, pressure + mid + 0.5) : NormalAt(stock + mid + 0.5, pressure - mid - 0.5));
+            }
+            return sum;
+        }
+
         // Totals: normal goods in an up-to-date market use the game's own quote (exact); otherwise the model above.
         public double BuyCost(int k)
         {
@@ -70,9 +87,7 @@ namespace TradeHelper
             {
                 try { return normal.QuoteTrade(-k).rawPrice * (1 + tax); } catch { }
             }
-            double s = 0;
-            for (int i = 0; i < k; i++) s += BuyUnit(i);
-            return s * (1 + tax);
+            return SumUnits(k, true) * (1 + tax);
         }
 
         public double SellRevenue(int k)
@@ -81,9 +96,7 @@ namespace TradeHelper
             {
                 try { return normal.QuoteTrade(k).rawPrice * (1 - tax); } catch { }
             }
-            double s = 0;
-            for (int i = 0; i < k; i++) s += SellUnit(i);
-            return s * (1 - tax);
+            return SumUnits(k, false) * (1 - tax);
         }
     }
 
@@ -138,12 +151,14 @@ namespace TradeHelper
             double v;
             if (routeCache.TryGetValue(key, out v)) return v;
             v = -1;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             try
             {
                 double au;
                 if (GalaxyDistanceUnit.TryCalculateGalaxyFieldRouteToAu(g1, g2, out au)) v = au;
             }
             catch { }
+            Budget.tRoute += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
             routeCache[key] = v;
             return v;
         }
@@ -222,6 +237,7 @@ namespace TradeHelper
         public static IEnumerator Scan(Snapshot snap, Config cfg)
         {
             var total = System.Diagnostics.Stopwatch.StartNew();
+            Budget.Reset();
             var gd = Game;
             snap.takenAt = DateTime.Now;
             if (gd == null) { snap.errors.Add("还没进入存档"); yield break; }
@@ -267,8 +283,10 @@ namespace TradeHelper
                 yield return null;
             }
 
+            long ti = System.Diagnostics.Stopwatch.GetTimestamp();
             try { ScanInventory(gd, snap); }
             catch (Exception e) { snap.errors.Add("读库存失败: " + e.Message); }
+            Budget.tInventory += System.Diagnostics.Stopwatch.GetTimestamp() - ti;
             yield return null;
 
             var adv = Advisor.Arbitrage(snap, cfg);
@@ -292,8 +310,6 @@ namespace TradeHelper
             snap.scanMs = total.ElapsedMilliseconds;
         }
 
-        const int GoodsPerStep = 40;
-
         static IEnumerator ScanMarket(FWExchangeSpace ex, MarketInfo m, Snapshot snap)
         {
             m.ex = ex;
@@ -305,10 +321,9 @@ namespace TradeHelper
             float S = 1f;
             try { S = ex.getTradeS(); } catch { }
             var items = new List<FWExchangeSpaceGoods>(ex.itemList); // the list belongs to the game: copy
-            int n = 0;
             foreach (var it in items)
             {
-                if (++n % GoodsPerStep == 0)
+                if (Budget.Over)
                 {
                     yield return null;
                     // A new game day may have queued a settlement day while we were paused: from then on this
@@ -316,16 +331,22 @@ namespace TradeHelper
                     if (exact && ex.hasPendingSettlement()) { exact = false; m.pendingDays = ex.pendingSettlementDays.Count; }
                 }
                 if (it == null || string.IsNullOrEmpty(it.GoodID)) continue;
+                long t0 = System.Diagnostics.Stopwatch.GetTimestamp(), t1;
                 Trade_Goods_Def def = null;
                 try { def = it.getGoodsDef(); } catch { }
+                t1 = System.Diagnostics.Stopwatch.GetTimestamp(); Budget.tDef += t1 - t0; t0 = t1;
                 if (def == null) continue;
+                Budget.nGoods++;
                 string cat;
                 snap.gidCategory.TryGetValue(it.GoodID, out cat);
                 var q = new GoodsQuote { market = m, gid = it.GoodID, name = def.Name, category = cat ?? "其他", type = def._type, itemId = def._id, contraband = it.isContraband, exact = exact };
                 try { q.tax = ex.getTaxRate(it.GoodID); } catch { q.tax = m.tax; }
+                t1 = System.Diagnostics.Stopwatch.GetTimestamp(); Budget.tTax += t1 - t0; t0 = t1;
                 try { q.ePool = ex.getEPool(it.GoodID); } catch { q.ePool = def.MarketSize; }
                 if (q.ePool <= 0) q.ePool = Math.Max(1, def.MarketSize);
+                t1 = System.Diagnostics.Stopwatch.GetTimestamp(); Budget.tPool += t1 - t0; t0 = t1;
                 float ev = EventPrice(ex.uid, it.GoodID);
+                t1 = System.Diagnostics.Stopwatch.GetTimestamp(); Budget.tEvent += t1 - t0; t0 = t1;
                 var ng = it as FWExchangeSpaceNormalGoods;
                 if (ng != null)
                 {
@@ -357,6 +378,7 @@ namespace TradeHelper
                     }
                     if (!q.exact) q.baseFactor = Mathf.Round(def.Price * sg.PriceNoise * Mathf.Max(0f, 1f + sg.BLocal)) * ev;
                 }
+                Budget.tBase += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
                 q.buy1 = q.BuyUnit(0) * (1 + q.tax);
                 q.sell1 = q.SellUnit(0) * (1 - q.tax);
                 m.goods.Add(q);

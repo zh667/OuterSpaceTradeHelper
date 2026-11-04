@@ -58,6 +58,28 @@ namespace TradeHelper
             nextAutoRefresh = Time.unscaledTime + Mathf.Max(5f, cfg.autoRefreshSeconds <= 0 ? 1e9f : cfg.autoRefreshSeconds);
         }
 
+        // Saves a screenshot of the whole screen (panel included) for feedback.
+        public void Screenshot() { StartCoroutine(CaptureAtEndOfFrame()); }
+
+        IEnumerator CaptureAtEndOfFrame()
+        {
+            yield return new WaitForEndOfFrame();
+            Texture2D tex = null;
+            try
+            {
+                var dir = System.IO.Path.Combine(Config.Dir, "shots");
+                System.IO.Directory.CreateDirectory(dir);
+                var p = System.IO.Path.Combine(dir, DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".png");
+                tex = new Texture2D(Screen.width, Screen.height, TextureFormat.RGB24, false);
+                tex.ReadPixels(new Rect(0, 0, Screen.width, Screen.height), 0, 0);
+                tex.Apply(false);
+                System.IO.File.WriteAllBytes(p, ImageConversion.EncodeToPNG(tex));
+                lastStatus = "截图已保存 " + p;
+            }
+            catch (Exception e) { lastStatus = "截图失败: " + e.Message; }
+            finally { if (tex != null) Destroy(tex); }
+        }
+
         public void ExportNow()
         {
             if (latest == null) { exportAfterScan = true; RequestRefresh(false); return; }
@@ -74,18 +96,17 @@ namespace TradeHelper
         {
             if (job == null) return;
             jobFrames++;
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            float budget = Mathf.Max(1f, cfg.scanMsPerFrame);
+            Budget.StartFrame(Mathf.Max(1f, cfg.scanMsPerFrame));
             try
             {
-                while (sw.Elapsed.TotalMilliseconds < budget)
+                while (!Budget.Over)
                 {
                     if (!job.MoveNext())
                     {
                         job = null;
                         latest = building; building = null;
                         Debug.Log("[TradeHelper] scan done: " + latest.markets.Count + " markets, " + latest.trades.Count + " trades, " + latest.sells.Count + " sells, " +
-                                  latest.scanMs + " ms over " + jobFrames + " frames");
+                                  latest.scanMs + " ms over " + jobFrames + " frames; " + Budget.Report());
                         if (window != null) window.OnSnapshot(latest);
                         if (exportAfterScan) { exportAfterScan = false; DoExport(latest); }
                         break;
