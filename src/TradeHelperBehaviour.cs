@@ -8,7 +8,7 @@ namespace TradeHelper
 {
     public class TradeHelperBehaviour : MonoBehaviour
     {
-        public const string Version = "0.3.7";
+        public const string Version = "0.3.8";
         public static TradeHelperBehaviour Instance;
 
         Config cfg;
@@ -52,6 +52,7 @@ namespace TradeHelper
 
         bool Visible => window != null && window.Visible;
         public Snapshot Latest => latest;
+        public Config Cfg => cfg;
         public bool Scanning => job != null;
 
         // Starts a background scan (no-op when one is already running unless restart is asked).

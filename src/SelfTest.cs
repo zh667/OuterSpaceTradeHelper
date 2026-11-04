@@ -92,6 +92,23 @@ namespace TradeHelper
             result.perf["firstScanWaitSeconds"] = Math.Round(Time.realtimeSinceStartup - ts, 1);
             result.perf["firstScan"] = Perf.LastScan;
 
+            // Prices are compared on up-to-date markets. If the save has few, bring the closest ones up to date with the
+            // mod's own background catch-up (the same work as opening their exchanges).
+            int exact = host.Latest.markets.FindAll(m => m.Exact && !m.planet).Count;
+            result.perf["exactMarketsAtLoad"] = exact;
+            if (exact < 10)
+            {
+                var stale = host.Latest.markets.FindAll(m => m.initialized && !m.Exact && !m.planet && m.Discovered);
+                stale.Sort((a, b) => a.pendingDays.CompareTo(b.pendingDays));
+                int n = Math.Min(15, stale.Count), days = 0;
+                for (int i = 0; i < n; i++) { host.settlement.Enqueue(stale[i].uid); days += stale[i].pendingDays; }
+                float tc = Time.realtimeSinceStartup;
+                while (host.settlement.Pending > 0 && Time.realtimeSinceStartup - tc < 400) yield return new WaitForSecondsRealtime(1);
+                result.perf["catchUp"] = n + " markets, " + days + " days, " + Math.Round(Time.realtimeSinceStartup - tc, 1) + " s, left " + host.settlement.Pending;
+                yield return Refresh();
+                result.perf["exactMarketsAfterCatchUp"] = host.Latest.markets.FindAll(m => m.Exact && !m.planet).Count;
+            }
+
             var snap = host.Latest;
             Run(() => CheckTax(snap));
             Run(() => CheckNormal(snap));
@@ -99,6 +116,8 @@ namespace TradeHelper
             Run(() => CheckSpecialResale(snap));
             Run(() => CheckSpecialSellModel(snap));
             Run(() => CheckAdvice(snap));
+
+            if (req.tests == "all" || req.tests.Contains("trade")) yield return Guard(TradeTest(), "real trade: buy, plan stages, sell");
 
             // A full scan from scratch, then a refresh with nothing changed.
             yield return TimedScan("fullScan", true);
@@ -127,6 +146,146 @@ namespace TradeHelper
             result.perf[name + "Seconds"] = Math.Round(Time.realtimeSinceStartup - t, 2);
             result.perf[name + "Collections"] = GC.CollectionCount(0) - gc0;
             result.perf[name] = Perf.LastScan;
+        }
+
+        // Runs a test coroutine; an exception ends that test as failed instead of stopping the whole self-test.
+        IEnumerator Guard(IEnumerator e, string name)
+        {
+            while (true)
+            {
+                object cur;
+                try
+                {
+                    if (!e.MoveNext()) yield break;
+                    cur = e.Current;
+                }
+                catch (Exception ex)
+                {
+                    var c = result.checks.Find(x => x.name == name);
+                    if (c == null) { c = new Check { name = name }; result.checks.Add(c); }
+                    c.passed = false;
+                    c.summary = "exception: " + ex.GetType().Name + ": " + ex.Message;
+                    c.details.Add(ex.StackTrace ?? "");
+                    yield break;
+                }
+                yield return cur;
+            }
+        }
+
+        IEnumerator Refresh()
+        {
+            float t = Time.realtimeSinceStartup;
+            host.RequestRefresh(true);
+            yield return null;
+            while (host.Scanning && Time.realtimeSinceStartup - t < 120) yield return null;
+        }
+
+        static long Uid(FWBaseBean b) => b is FWUidItem u ? u.uid : b is FWThingBean t ? t.uid : -1L;
+
+        static bool SameMoney(double paid, double estimate) => Math.Abs(paid - estimate) <= Math.Max(2.0, Math.Abs(paid) * 1e-4);
+
+        // A real purchase and sale of special goods in the test save, done the way the trade page's checkout does it for
+        // non-equipment special goods (PageTradeInventory.DoCheckout + TakeSpecialThingGoods): price from
+        // getPriceForPlayerBuy/Sell, the checkout tax, RoundPayment, items moved between the store and the fleet hold.
+        // Checks the mod's cost and revenue against what was charged and paid, and that the plan moves through its
+        // stages on its own and names the market it was sold at.
+        IEnumerator TradeTest()
+        {
+            var c = new Check { name = "real trade: buy, plan stages, sell" };
+            result.checks.Add(c);
+            var snap = host.Latest;
+            var gd = MarketScanner.Game;
+            GoodsQuote qb = null, qs = null;
+            const int k = 3;
+            foreach (var m in snap.markets)
+            {
+                if (qb != null) break;
+                if (!m.Exact || m.planet) continue;
+                foreach (var q in m.goods)
+                {
+                    if (!q.special || q.specialGoods == null || q.specialGoods.UsesEquipmentPressure || q.storeDur == null || !q.buyable || q.contraband || q.stock < k) continue;
+                    // Items that go into the fleet hold (not DNA, creatures or ships).
+                    bool holdItems = q.specialGoods.goodsList != null && q.specialGoods.goodsList.TrueForAll(g => g != null && g.goods is FWThingBean);
+                    if (!holdItems) continue;
+                    foreach (var m2 in snap.markets)
+                    {
+                        GoodsQuote q2;
+                        if (m2 == m || !m2.Exact || m2.planet || !m2.byGid.TryGetValue(q.gid, out q2) || q2.contraband || q2.specialGoods == null) continue;
+                        qb = q; qs = q2; break;
+                    }
+                    if (qb != null) break;
+                }
+            }
+            if (qb == null) { c.passed = false; c.summary = "no special goods with two up-to-date markets"; yield break; }
+            var fleet = AirShipLocalData.Instance.getCurFleet();
+            if (fleet == null) { c.passed = false; c.summary = "no current fleet"; yield break; }
+            var ctx = new FleetInventoryContext(fleet, false);
+
+            var idea = new TradeIdea { gid = qb.gid, name = qb.name, category = qb.category, buy = qb, sell = qs, qty = k,
+                                       cost = qb.BuyCost(k), revenue = qs.SellBoughtRevenue(0, qb, 0, k) };
+            var plan = Plans.FromTrade(idea, snap, host.Cfg, host.settlement);
+            long cp0 = gd.creditPoint;
+
+            // Buy.
+            var sgB = qb.specialGoods;
+            var store = new List<FWBaseBean>();
+            foreach (var g in sgB.goodsList) if (g?.goods != null) store.Add(g.goods);
+            store.Sort((a, b) => { int n = sgB.getPDurability(b).CompareTo(sgB.getPDurability(a)); return n != 0 ? n : Uid(b).CompareTo(Uid(a)); });
+            var take = store.GetRange(0, k);
+            float tB = FWGlobalParameter.ApplyTradeTaxRate(qb.market.ex.getTaxRate());
+            long payB = FWTradePricePressure.RoundPayment(sgB.getPriceForPlayerBuy(take) * Math.Max(0.0, 1.0 + tB), true);
+            gd.addCP(-payB, "TradeHelper selftest buy");
+            var bought = new List<FWThingBean>();
+            foreach (var it in take)
+            {
+                if (it is FWThingBean tb) bought.Add(tb.copyBean());
+                for (int i = sgB.goodsList.Count - 1; i >= 0; i--) if (sgB.goodsList[i] != null && sgB.goodsList[i].goods == it) { sgB.goodsList.RemoveAt(i); break; }
+            }
+            if (bought.Count != k) { c.passed = false; c.summary = "bought " + bought.Count + " hold items instead of " + k; yield break; }
+            int probeType = bought[0].type; string probeId = bought[0].id;
+            ctx.AddBoughtItems(bought, qb.market.ex);   // the hold takes the items over (the list may be emptied)
+            bool buyOk = SameMoney(payB, idea.cost);
+            c.details.Add("buy " + k + " " + qb.name + " at " + qb.market.name + ": charged " + payB + ", mod cost " + idea.cost.ToString("0") + (buyOk ? " ok" : " DIFFERENT"));
+
+            yield return Refresh();
+            bool stage2 = plan.state == 1 && plan.boughtQty == k && plan.autoBought;
+            c.details.Add("after buying: " + plan.StateText + (stage2 ? " ok" : " WRONG (expected stage 2 with " + k + ")"));
+
+            // Sell the bought items at the plan's sell market.
+            double estimate = plan.curRevenue;
+            var sm = host.Latest.markets.Find(m => m.uid == qs.market.uid);
+            GoodsQuote qs2 = null;
+            if (sm != null) sm.byGid.TryGetValue(qb.gid, out qs2);
+            var sgS = qs2 != null ? qs2.specialGoods : qs.specialGoods;
+            // The hold merges bought items into existing stacks: take k units of that goods, best durability first.
+            var things = ctx.GetTradeThings();
+            var stacks = things != null ? things.FindAll(t => t != null && t.type == probeType && t.id == probeId && t.getSum() > 0) : new List<FWThingBean>();
+            stacks.Sort((a, b) => sgS.getPDurability(b).CompareTo(sgS.getPDurability(a)));
+            var sold = new List<FWBaseBean>();
+            var removed = new List<FWThingBean>();
+            foreach (var t in stacks)
+            {
+                if (sold.Count >= k) break;
+                int n = Math.Min(t.getSum(), k - sold.Count);
+                for (int i = 0; i < n; i++) sold.Add(t);
+                var r = t.copyBean(); r.setSum(n); removed.Add(r);
+            }
+            float tS = FWGlobalParameter.ApplyTradeTaxRate(sm != null ? sm.ex.getTaxRate() : qs.market.ex.getTaxRate());
+            if (sold.Count != k) { c.passed = false; c.summary = "only " + sold.Count + " of the goods in the fleet hold"; yield break; }
+            long payS = FWTradePricePressure.RoundPayment(sgS.getPriceForPlayerSell(sold) * Math.Max(0.0, 1.0 - tS), false);
+            gd.addCP(payS, "TradeHelper selftest sell");
+            foreach (var r in removed) for (int i = 0; i < r.getSum(); i++) { var one = r.copyBean(); one.setSum(1); sgS.addGoods(one); }
+            ctx.RemoveSoldItems(removed);
+            bool sellOk = SameMoney(payS, estimate);
+            c.details.Add("sell " + k + " at " + qs.market.name + ": paid " + payS + ", plan said " + estimate.ToString("0") + (sellOk ? " ok" : " DIFFERENT"));
+
+            yield return Refresh();
+            bool stage3 = plan.state == 2 && plan.autoDone && plan.doneNote != null && plan.doneNote.Contains(qs.market.name);
+            c.details.Add("after selling: " + plan.StateText + " / " + plan.doneNote + (stage3 ? " ok" : " WRONG"));
+            bool creditsOk = gd.creditPoint == cp0 - payB + payS;
+            c.details.Add("credits " + cp0 + " -> " + gd.creditPoint + (creditsOk ? " ok" : " WRONG"));
+            c.passed = buyOk && stage2 && sellOk && stage3 && creditsOk;
+            c.summary = (c.passed ? "all steps match" : "some steps differ") + " (" + qb.name + " " + qb.market.name + " -> " + qs.market.name + ")";
         }
 
         static double Rel(double a, double b) => Math.Abs(a - b) / Math.Max(1.0, Math.Max(Math.Abs(a), Math.Abs(b)));

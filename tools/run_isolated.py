@@ -9,7 +9,7 @@ Runtime: local/runtime (a copy of the installed game). The copy differs from the
 The original installation and the player's LocalLow/CatStudio/Outer Space are only read (one save is copied).
 The self-test runs only when <runtime>/TradeHelperSelfTest.json exists; it writes <runtime>/selftest-result.json.
 """
-import argparse, json, os, shutil, subprocess, sys, time
+import argparse, json, os, re, shutil, subprocess, sys, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,6 +77,9 @@ def newest_save(prefix):
         if not d.is_dir() or not d.name.startswith(prefix):
             continue
         arcs = list(d.glob("*.arc"))
+        # Skip a save written in the last minute: the running game may still be writing it.
+        if arcs and time.time() - arcs[0].stat().st_mtime < 60:
+            continue
         if arcs and (best is None or arcs[0].stat().st_mtime > best[0]):
             best = (arcs[0].stat().st_mtime, d.name)
     return best[1] if best else prefix
@@ -163,7 +166,7 @@ def main():
     if log.exists():
         lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
         quit_at = next((i for i, l in enumerate(lines) if "Application Quit" in l), len(lines))
-        exc = [i for i, l in enumerate(lines) if l.startswith(("NullReferenceException", "System.", "Exception")) and "Exception" in l.split(":")[0]]
+        exc = [i for i, l in enumerate(lines) if re.match(r"^[\w.]*Exception\b", l)]
         mod_exc = [i for i in exc if any("TradeHelper" in lines[j] for j in range(i, min(len(lines), i + 15)))]
         mod_exceptions = len(mod_exc)
         print("--- game log: %d exception stacks (%d before quit), %d with mod code ---" % (len(exc), sum(1 for i in exc if i < quit_at), len(mod_exc)))
