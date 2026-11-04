@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using UnityEngine;
 
 namespace TradeHelper
@@ -173,6 +174,7 @@ namespace TradeHelper
         public string galaxyId;
         public bool planet;          // a planet's ground market (地面交易行): used from a base on that planet, not by the fleet
         public string starId;
+        public FWStarInfo star;      // planet market: its planet
         public string where = "";    // where in the game this market is opened
         public string groundBase;    // planet market: the player's base on that planet, if any
         public bool initialized;
@@ -398,7 +400,7 @@ namespace TradeHelper
                     string sname;
                     try { sname = st.getStarName(); } catch { sname = null; }
                     if (string.IsNullOrEmpty(sname)) sname = st.starName ?? st.starId;
-                    yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(st.exchangeSpace, new MarketInfo { uid = st.exchangeSpace.uid, name = sname + " 地面交易行", galaxyId = g.id, planet = true, starId = st.starId, observe = g.observaState });
+                    yield return new KeyValuePair<FWExchangeSpace, MarketInfo>(st.exchangeSpace, new MarketInfo { uid = st.exchangeSpace.uid, name = sname + " 地面交易行", galaxyId = g.id, planet = true, starId = st.starId, star = st, observe = g.observaState });
                 }
             }
         }
@@ -500,6 +502,7 @@ namespace TradeHelper
             var gd = Game;
             snap.takenAt = DateTime.Now;
             if (gd == null) { snap.errors.Add("还没进入存档"); yield break; }
+            if (!diskLoaded) LoadDiskCache();
             snap.credits = gd.creditPoint;
             try { snap.fleetGalaxyId = gd.galaxyBlock?.playerFleet?.pos?.galaxyId; } catch { }
             try
@@ -634,7 +637,149 @@ namespace TradeHelper
         static readonly System.Random rng = new System.Random();
         const int SamplesPerMarket = 8;
 
-        public static void ClearCache() { econCache.Clear(); lastComplete = null; }
+        // allowDisk: false keeps the next scan from reusing the cache file (a scan from scratch).
+        public static void ClearCache(bool allowDisk = true)
+        {
+            econCache.Clear(); lastComplete = null; fromDisk.Clear();
+            diskLoaded = !allowDisk;
+        }
+
+        // The cache is also kept on disk (econ-cache.bin in the mod's settings folder) for the save it was read from, so
+        // a new game session does not have to ask the game for every goods line again. Markets taken from the file are
+        // spot-checked with twice the usual sample the first time they are used; any difference drops that market.
+        const int DiskFormat = 1;
+        static bool diskLoaded, diskDirty;
+        static readonly HashSet<long> fromDisk = new HashSet<long>();
+        static string DiskPath => Path.Combine(Config.Dir, "econ-cache.bin");
+        public static int DiskMarketsLoaded;
+
+        static string ArchiveId()
+        {
+            try { return UserBean.getInstance()?.archive?.info?.EnsureArchiveId(); } catch { return null; }
+        }
+
+        static void LoadDiskCache()
+        {
+            diskLoaded = true;
+            DiskMarketsLoaded = 0;
+            var id = ArchiveId();
+            if (id == null || !File.Exists(DiskPath)) return;
+            try
+            {
+                using (var br = new BinaryReader(File.OpenRead(DiskPath)))
+                {
+                    if (br.ReadInt32() != DiskFormat || br.ReadString() != id) return;
+                    int markets = br.ReadInt32();
+                    for (int i = 0; i < markets; i++)
+                    {
+                        long uid = br.ReadInt64(), rev = br.ReadInt64();
+                        int n = br.ReadInt32();
+                        var mc = new MarketCache { revision = rev };
+                        for (int j = 0; j < n; j++)
+                        {
+                            string gid = br.ReadString();
+                            float pool = br.ReadSingle(), lean = br.ReadSingle();
+                            mc.byGid[gid] = new Econ { pool = pool, lean = lean };
+                        }
+                        if (!econCache.ContainsKey(uid) && n > 0) { econCache[uid] = mc; fromDisk.Add(uid); DiskMarketsLoaded++; }
+                    }
+                }
+            }
+            catch (Exception e) { Debug.LogWarning("[TradeHelper] econ cache read failed: " + e.Message); econCache.Clear(); fromDisk.Clear(); DiskMarketsLoaded = 0; }
+        }
+
+        public static void SaveDiskCache()
+        {
+            if (!diskDirty) return;
+            var id = ArchiveId();
+            if (id == null) return;
+            diskDirty = false;
+            try
+            {
+                Directory.CreateDirectory(Config.Dir);
+                var tmp = DiskPath + ".tmp";
+                using (var bw = new BinaryWriter(File.Create(tmp)))
+                {
+                    bw.Write(DiskFormat); bw.Write(id);
+                    int count = 0; foreach (var kv in econCache) if (kv.Value.byGid.Count > 0) count++;
+                    bw.Write(count);
+                    foreach (var kv in econCache)
+                    {
+                        if (kv.Value.byGid.Count == 0) continue;
+                        bw.Write(kv.Key); bw.Write(kv.Value.revision); bw.Write(kv.Value.byGid.Count);
+                        foreach (var g in kv.Value.byGid) { bw.Write(g.Key); bw.Write(g.Value.pool); bw.Write(g.Value.lean); }
+                    }
+                }
+                File.Copy(tmp, DiskPath, true);
+                File.Delete(tmp);
+            }
+            catch (Exception e) { Debug.LogWarning("[TradeHelper] econ cache write failed: " + e.Message); }
+        }
+
+        // Test support: every cached value against the game's live functions (neither settles a market).
+        public static void CompareCacheWithLive(Snapshot snap, out int markets, out int compared, out int differ)
+        {
+            markets = compared = differ = 0;
+            foreach (var m in snap.markets)
+            {
+                MarketCache mc;
+                if (!m.initialized || m.ex == null || !econCache.TryGetValue(m.uid, out mc) || mc.byGid.Count == 0) continue;
+                markets++;
+                foreach (var it in new List<FWExchangeSpaceGoods>(m.ex.itemList))
+                {
+                    Econ e;
+                    if (it == null || it.GoodID == null || !mc.byGid.TryGetValue(it.GoodID, out e)) continue;
+                    var def = it.getGoodsDef(); if (def == null) continue;
+                    compared++;
+                    if (!Same(e, ReadEcon(m.ex, it, def, m.tax))) differ++;
+                }
+            }
+        }
+
+        // The economic sources of one market, gathered once: what FWExchangeSpace.calculateEPool and
+        // FWExchangeSpaceGoods.calculationLStellar loop over for every goods (they copy the whole spaceport list on
+        // each call). Summing the same sources in the same order with the same float arithmetic gives the same values.
+        public class Region
+        {
+            public bool star;
+            public List<FWStarMapInfo> towns = new List<FWStarMapInfo>();
+            public List<FWSpaceport> stations = new List<FWSpaceport>();
+            public FWGalaxy galaxy;
+        }
+
+        public static Region RegionOf(FWExchangeSpace ex, FWGameData gd)
+        {
+            var r = new Region();
+            var region = ex.getRegion();
+            if (region is FWStarInfo st)
+            {
+                r.star = true;
+                if (st.starMapList != null) foreach (var sm in st.starMapList) if (StoryFacilityRules.IsEconomicTown(sm)) r.towns.Add(sm);
+                return r;
+            }
+            r.galaxy = ex.getGalaxy();
+            var list = gd?.getSpaceportList();
+            if (list != null) foreach (var sp in list) if (StoryFacilityRules.IsEconomic(sp) && sp.galaxyId == ex.galaxyId) r.stations.Add(sp);
+            return r;
+        }
+
+        public static float EPoolOf(Region r, string gid)
+        {
+            float num = 0f;
+            if (r.star) { foreach (var t in r.towns) num += t.getETown(gid); return num; }
+            foreach (var sp in r.stations) num += sp.getEStation(gid);
+            return num;
+        }
+
+        public static float LeanOf(Region r, string gid)
+        {
+            float l = 1f;
+            if (r.star) { foreach (var t in r.towns) l += t.getLTown(gid); return l; }
+            foreach (var sp in r.stations) l += sp.getLStation(gid);
+            l += TradeFacilityEconomics.getStellarCapacity(r.galaxy, gid, "Leaning");
+            if (l < 0f) l = 0f;
+            return l;
+        }
 
         static Econ ReadEcon(FWExchangeSpace ex, FWExchangeSpaceGoods it, Trade_Goods_Def def, float fallbackTax)
         {
@@ -649,7 +794,7 @@ namespace TradeHelper
             return e;
         }
 
-        static bool Same(Econ a, Econ b) => a.tax == b.tax && a.pool == b.pool && a.lean == b.lean;
+        static bool Same(Econ a, Econ b) => a.pool == b.pool && a.lean == b.lean;
 
         static IEnumerator ScanMarket(FWExchangeSpace ex, MarketInfo m, Snapshot snap)
         {
@@ -664,9 +809,10 @@ namespace TradeHelper
             try { BG = ex.getBGlobal(); } catch { }
             var items = new List<FWExchangeSpaceGoods>(ex.itemList); // the list belongs to the game: copy
 
+            // getEPool and getLStellar do not settle the market (they read the stations and trade rules), so markets that
+            // owe days use them too, through the same cache.
             MarketCache mc;
             econCache.TryGetValue(ex.uid, out mc);
-            if (exact)
             {
                 if (mc == null || mc.revision != ex.latestEconomicRevision)
                 {
@@ -675,8 +821,9 @@ namespace TradeHelper
                 }
                 else if (mc.byGid.Count > 0)
                 {
-                    // Spot-check the cache against live values before trusting it.
-                    for (int k = 0; k < SamplesPerMarket && items.Count > 0; k++)
+                    // Spot-check the cache against live values before trusting it (more samples for values from disk).
+                    int samples = fromDisk.Remove(ex.uid) ? SamplesPerMarket * 2 : SamplesPerMarket;
+                    for (int k = 0; k < samples && items.Count > 0; k++)
                     {
                         var it = items[rng.Next(items.Count)];
                         Econ cached;
@@ -689,6 +836,7 @@ namespace TradeHelper
                             Perf.cacheMismatch++;
                             Debug.Log("[TradeHelper] economics cache mismatch in " + m.name + " (" + it.GoodID + "): cache dropped");
                             mc.byGid.Clear();
+                            diskDirty = true;
                             break;
                         }
                     }
@@ -717,13 +865,13 @@ namespace TradeHelper
 
                 Econ e = null;
                 if (mc != null && mc.byGid.TryGetValue(it.GoodID, out e)) Perf.cacheHits++;
-                else if (exact)
+                else
                 {
                     e = ReadEcon(ex, it, def, m.tax);
                     mc.byGid[it.GoodID] = e;
+                    diskDirty = true;
                     Perf.cacheMisses++;
                 }
-                // A market that owes days keeps the last values read while it was up to date (an estimate).
                 float lean = e != null ? e.lean : 1f;
                 // Checkout charges the market's rate on every goods line (see TradeTax).
                 q.tax = m.tax;

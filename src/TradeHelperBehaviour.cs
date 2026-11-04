@@ -8,7 +8,7 @@ namespace TradeHelper
 {
     public class TradeHelperBehaviour : MonoBehaviour
     {
-        public const string Version = "0.3.8";
+        public const string Version = "0.4.0";
         public static TradeHelperBehaviour Instance;
 
         Config cfg;
@@ -53,6 +53,7 @@ namespace TradeHelper
         bool Visible => window != null && window.Visible;
         public Snapshot Latest => latest;
         public Config Cfg => cfg;
+        public void ShowTab(int t) { if (window != null) window.SelectTab(t); }
         public bool Scanning => job != null;
 
         // Starts a background scan (no-op when one is already running unless restart is asked).
@@ -137,6 +138,7 @@ namespace TradeHelper
                         Perf.LastScan = line;
                         Perf.Write(line, cfg);
                         Debug.Log("[TradeHelper] " + line);
+                        MarketScanner.SaveDiskCache();
                         long tp = Perf.Now;
                         Plans.Track(latest, cfg, settlement);
                         Perf.Add(Perf.Cat.Plans, tp);
