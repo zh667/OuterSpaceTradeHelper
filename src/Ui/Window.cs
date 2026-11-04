@@ -42,7 +42,7 @@ namespace TradeHelper.Ui
         readonly Dictionary<int, IView> views = new Dictionary<int, IView>();
         int tab;
         public Snapshot snap;
-        static readonly string[] TabNames = { "跑商建议", "卖库存", "各站市场", "我的库存", "后台补算", "设置" };
+        static readonly string[] TabNames = { "跑商建议", "跑商计划", "卖库存", "各站市场", "我的库存", "后台补算", "设置" };
         public const float W = 1560, H = 860, BodyY = 112, Pad = 18;
         public float BodyW => W - Pad * 2;
         public float BodyH => H - BodyY - Pad;
@@ -100,9 +100,9 @@ namespace TradeHelper.Ui
             for (int i = 0; i < TabNames.Length; i++)
             {
                 int ti = i;
-                tabButtons.Add(Kit.TabButton(win, TabNames[i], Pad + i * 132, 58, 126, 36, () => SelectTab(ti)));
+                tabButtons.Add(Kit.TabButton(win, TabNames[i], Pad + i * 122, 58, 116, 36, () => SelectTab(ti)));
             }
-            status = Kit.TxtAt(win, "", Pad + TabNames.Length * 132 + 12, 56, W - Pad * 2 - TabNames.Length * 132 - 12, 34, 15, Theme.Text2, TextAlignmentOptions.MidlineRight);
+            status = Kit.TxtAt(win, "", Pad + TabNames.Length * 122 + 12, 56, W - Pad * 2 - TabNames.Length * 122 - 12, 34, 15, Theme.Text2, TextAlignmentOptions.MidlineRight);
             var sep = Kit.Place(Kit.New("Sep", win), Pad, 98, W - Pad * 2, 1);
             Kit.Img(sep, Theme.White, Theme.Line);
 
@@ -125,11 +125,12 @@ namespace TradeHelper.Ui
                 switch (t)
                 {
                     case 0: v = new TradesView(this, body, cfg, host); break;
-                    case 1: v = new SellsView(this, body, cfg, host); break;
-                    case 2: v = new MarketsView(this, body, cfg, host); break;
-                    case 3: v = new InventoryView(this, body, cfg, host); break;
-                    case 4: v = new SettlementView(this, body, cfg, host); break;
-                    case 5: v = new SettingsView(this, body, cfg, host); break;
+                    case 1: v = new PlansView(this, body, cfg, host); break;
+                    case 2: v = new SellsView(this, body, cfg, host); break;
+                    case 3: v = new MarketsView(this, body, cfg, host); break;
+                    case 4: v = new InventoryView(this, body, cfg, host); break;
+                    case 5: v = new SettlementView(this, body, cfg, host); break;
+                    case 6: v = new SettingsView(this, body, cfg, host); break;
                 }
                 views[t] = v;
                 if (snap != null) v.OnSnapshot(snap);
@@ -141,6 +142,12 @@ namespace TradeHelper.Ui
         {
             snap = s;
             foreach (var v in views.Values) v.OnSnapshot(s);
+        }
+
+        // Plans were added/removed outside the plans page: refresh tables that show tracking state.
+        public void RefreshViews()
+        {
+            if (snap != null) foreach (var v in views.Values) v.OnSnapshot(snap);
         }
 
         public void SetStatus(string s) { if (status != null) status.text = s; }

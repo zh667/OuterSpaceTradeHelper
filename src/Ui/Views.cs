@@ -46,25 +46,29 @@ namespace TradeHelper.Ui
 
             var cols = new List<Column<TradeIdea>>
             {
-                new Column<TradeIdea> { title = "商品", width = 165, text = t => t.name, key = t => t.name },
-                new Column<TradeIdea> { title = "类别", width = 80, text = t => t.category, key = t => t.category, color = _ => Theme.Text2 },
-                new Column<TradeIdea> { title = "在哪买", width = 205, text = t => t.buy.market.name, key = t => t.buy.market.name, color = t => Fmt.FreshColor(t.buy.market) },
+                new Column<TradeIdea> { title = "商品", width = 150, text = t => t.name, key = t => t.name },
+                new Column<TradeIdea> { title = "类别", width = 70, text = t => t.category, key = t => t.category, color = _ => Theme.Text2 },
+                new Column<TradeIdea> { title = "在哪买", width = 185, text = t => t.buy.market.name, key = t => t.buy.market.name, color = t => Fmt.FreshColor(t.buy.market) },
                 new Column<TradeIdea> { title = "买几个", width = 64, text = t => t.qty.ToString(), key = t => t.qty, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<TradeIdea> { title = "成本(含税)", width = 105, text = t => Fmt.Money(t.cost), key = t => t.cost, numeric = true, align = TextAlignmentOptions.MidlineRight },
-                new Column<TradeIdea> { title = "去哪卖", width = 205, text = t => t.sell.market.name, key = t => t.sell.market.name, color = t => Fmt.FreshColor(t.sell.market) },
+                new Column<TradeIdea> { title = "去哪卖", width = 185, text = t => t.sell.market.name, key = t => t.sell.market.name, color = t => Fmt.FreshColor(t.sell.market) },
                 new Column<TradeIdea> { title = "到手(扣税)", width = 105, text = t => Fmt.Money(t.revenue), key = t => t.revenue, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<TradeIdea> { title = "净赚", width = 105, text = t => Fmt.Money(t.Profit), key = t => t.Profit, numeric = true, align = TextAlignmentOptions.MidlineRight, color = _ => Theme.Accent },
                 new Column<TradeIdea> { title = "利润率", width = 76, text = t => (t.Margin * 100).ToString("0") + "%", key = t => t.Margin, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<TradeIdea> { title = "买→卖 航程", width = 112, text = t => Fmt.Dist(t.legAu), key = t => t.legAu < 0 ? (IComparable)null : t.legAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<TradeIdea> { title = "舰队→买入站", width = 112, text = t => Fmt.Dist(t.fleetAu), key = t => t.fleetAu < 0 ? (IComparable)null : t.fleetAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
-                new Column<TradeIdea> { title = "每光年净赚", width = 105, text = t => { var v = PerLy(t); return double.IsNaN(v) ? "?" : Fmt.Money(v); }, key = t => { var v = PerLy(t); return double.IsNaN(v) ? (IComparable)null : v; }, numeric = true, align = TextAlignmentOptions.MidlineRight },
-                new Column<TradeIdea> { title = "数据", width = 72, text = t => t.Stale ? "估·欠" + t.MaxPending + "天" : "实时", key = t => t.MaxPending, numeric = true, color = t => t.Stale ? Theme.Warn : Theme.Good },
+                new Column<TradeIdea> { title = "每光年净赚", width = 95, text = t => { var v = PerLy(t); return double.IsNaN(v) ? "?" : Fmt.Money(v); }, key = t => { var v = PerLy(t); return double.IsNaN(v) ? (IComparable)null : v; }, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<TradeIdea> { title = "数据", width = 66, text = t => t.Stale ? "估·欠" + t.MaxPending + "天" : "实时", key = t => t.MaxPending, numeric = true, color = t => t.Stale ? Theme.Warn : Theme.Good },
+                new Column<TradeIdea> { title = "", width = 74, buttonText = t => Tracked(t) ? "追踪中" : "追踪", buttonEnabled = t => !Tracked(t),
+                    onButton = t => { if (snap != null) Plans.FromTrade(t, snap, cfg, host.settlement); host.PlansChanged(); } },
             };
             table = new Table<TradeIdea>(root, 0, 60, w.BodyW, w.BodyH - 60, cols, cfg.tradesSort, cfg.tradesDesc);
             table.emptyText = "没有扣税后能赚钱的组合（或都被筛掉了）。可以放宽“数据”或先在“后台补算”页补算更多站。";
             table.filter = t => WithinLy(t.fleetAu, cfg.maxFleetLy) && t.Profit >= cfg.minProfit && (category == null || t.category == category) && Match(search, t.name, t.buy.market.name, t.sell.market.name);
             table.sortChanged = (c, d) => SaveSort();
         }
+
+        static bool Tracked(TradeIdea t) => Plans.list.Exists(p => p.state != 2 && p.gid == t.gid && p.buyUid == t.buy.market.uid && p.sellUid == t.sell.market.uid);
 
         void SaveSort() { cfg.tradesSort = table.sortCol; cfg.tradesDesc = table.desc; cfg.Save(); }
 
@@ -112,11 +116,15 @@ namespace TradeHelper.Ui
                 new Column<SellIdea> { title = "首件到手", width = 110, text = s => Fmt.Money(s.firstUnitNet), key = s => s.firstUnitNet, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<SellIdea> { title = "舰队→卖出站", width = 130, text = s => Fmt.Dist(s.fleetAu), key = s => s.fleetAu < 0 ? (IComparable)null : s.fleetAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<SellIdea> { title = "数据", width = 90, text = s => s.market.market.Exact ? "实时" : "估·欠" + s.market.market.pendingDays + "天", key = s => s.market.market.pendingDays, numeric = true, color = s => s.market.market.Exact ? Theme.Good : Theme.Warn },
+                new Column<SellIdea> { title = "", width = 74, buttonText = s => SellTracked(s) ? "追踪中" : "追踪", buttonEnabled = s => !SellTracked(s),
+                    onButton = s => { if (snap != null) Plans.FromSell(s, snap, cfg, host.settlement); host.PlansChanged(); } },
             };
             table = new Table<SellIdea>(root, 0, 60, w.BodyW, w.BodyH - 60, cols, cfg.sellsSort, cfg.sellsDesc);
             table.filter = s => WithinLy(s.fleetAu, cfg.maxFleetLy) && (category == null || s.category == category) && Match(search, s.name, s.location, s.market.market.name);
             table.sortChanged = (c, d) => SaveSort();
         }
+
+        static bool SellTracked(SellIdea s) => Plans.list.Exists(p => p.state != 2 && p.key == s.key && p.sellUid == s.market.market.uid);
 
         void SaveSort() { cfg.sellsSort = table.sortCol; cfg.sellsDesc = table.desc; cfg.Save(); }
 
@@ -397,7 +405,10 @@ namespace TradeHelper.Ui
     public class SettingsView : ViewBase
     {
         readonly Table<string> errors;
-        readonly TextMeshProUGUI path;
+        readonly TextMeshProUGUI path, hint, perf;
+        readonly Kit.Drop dirDrop;
+        readonly TMP_InputField custom;
+        float nextPerf;
         static readonly int[] DayOpts = { 1, 2, 3, 5, 10 };
         static readonly float[] RefreshOpts = { 15, 30, 60, 120, 0 };
         static readonly float[] ExportOpts = { 0, 60, 300, 900 };
@@ -423,19 +434,46 @@ namespace TradeHelper.Ui
                 i => { cfg.exportEverySeconds = ExportOpts[i]; cfg.Save(); });
             Kit.Button(root, "立即导出", 430, y, 120, 30, () => host.ExportNow(), true);
             y += 42;
-            Drop("数据文件和截图放在：", 0, y, 420, new List<string> { "C 盘游戏数据目录（默认）", "游戏目录里本模组的文件夹", "自定义文件夹" }, Mathf.Clamp(cfg.dataDirMode, 0, 2),
-                i => { cfg.dataDirMode = i; cfg.Save(); ShowPath(); });
-            var custom = Kit.Input(root, "例如 E:\\OuterSpaceTrade", 430, y, 420, 30, null);
+            dirDrop = Drop("数据文件、截图和性能日志放在：", 0, y, 420, new List<string> { "C 盘游戏数据目录（默认）", "游戏目录里本模组的 data 文件夹", "自定义文件夹" }, Mathf.Clamp(cfg.dataDirMode, 0, 2),
+                i =>
+                {
+                    if (i == 2 && string.IsNullOrEmpty(cfg.dataDirCustom))
+                    {
+                        // Nothing typed yet: keep the current folder until a folder is entered.
+                        dirDrop.SetOptions(dirDrop.options, cfg.dataDirMode);
+                        hint.text = "<color=#F4B30D>先在右边输入文件夹（例如 E:\\OuterSpaceTrade），再点「用这个文件夹」。</color>";
+                        return;
+                    }
+                    cfg.dataDirMode = i; cfg.Save(); Applied();
+                });
+            custom = Kit.Input(root, "例如 E:\\OuterSpaceTrade", 430, y, 420, 30, null);
             custom.text = cfg.dataDirCustom ?? "";
-            Kit.Button(root, "用这个文件夹", 858, y, 140, 30, () => { cfg.dataDirCustom = custom.text.Trim(); cfg.dataDirMode = 2; cfg.Save(); ShowPath(); });
+            Kit.Button(root, "用这个文件夹", 858, y, 140, 30, () =>
+            {
+                var t = custom.text.Trim();
+                if (string.IsNullOrEmpty(t)) { hint.text = "<color=#F4B30D>先输入文件夹路径。</color>"; return; }
+                cfg.dataDirCustom = t; cfg.dataDirMode = 2; cfg.Save();
+                dirDrop.SetOptions(dirDrop.options, 2);
+                Applied();
+            });
+            Kit.Button(root, "打开文件夹", 1006, y, 140, 30, () => { try { Application.OpenURL("file:///" + cfg.DataDir.Replace("\\", "/")); } catch { } });
             y += 36;
             path = Kit.TxtAt(root, "", 0, y, w.BodyW, 26, 14, Theme.Text2);
+            y += 26;
+            hint = Kit.TxtAt(root, "", 0, y, w.BodyW, 26, 14, Theme.Text2);
             ShowPath();
             y += 30;
-            Kit.TxtAt(root, "放在游戏目录里不影响游戏：游戏只读取模组文件夹里的 Manifest 和程序文件，Steam 校验和更新也不会删除多出来的文件。配置文件 config.json 固定留在 C 盘游戏数据目录。", 0, y, w.BodyW, 26, 14, Theme.Text2);
-            y += 36;
-            Kit.TxtAt(root, "距离和游戏一样按星门航线算（AU；超过 1 光年显示 ly）。“舰队→某站”= 你的舰队现在所在星系到那个站所在星系的航程。", 0, y, w.BodyW, 26, 14, Theme.Text2);
-            y += 36;
+            Kit.TxtAt(root, "放在游戏目录里不影响游戏：游戏只读取模组文件夹里的 Manifest 和程序文件，Steam 校验和更新也不删多出来的文件；更新本模组时 data 文件夹会保留。配置 config.json 和计划 plans.json 固定在 C 盘游戏数据目录。", 0, y, w.BodyW, 26, 14, Theme.Text2);
+            y += 34;
+            Kit.TxtAt(root, "距离和游戏一样按星门航线算（超过 1 光年显示 ly）。“舰队→某站”= 你的舰队现在所在星系到那个站所在星系的航程。", 0, y, w.BodyW, 26, 14, Theme.Text2);
+            y += 34;
+            Kit.TxtAt(root, "性能（每 30 秒写一行到 perf.log）", 0, y, 400, 28, 17, Theme.Text);
+            y += 30;
+            perf = Kit.Txt(root, "", 13, Theme.Text2, TextAlignmentOptions.TopLeft);
+            Kit.Place(perf.rectTransform, 0, y, w.BodyW, 66);
+            perf.enableWordWrapping = true;
+            perf.overflowMode = TextOverflowModes.Truncate;
+            y += 70;
             Kit.TxtAt(root, "读取问题", 0, y, 300, 30, 17, Theme.Text);
             y += 34;
             var cols = new List<Column<string>> { new Column<string> { title = "内容", width = w.BodyW - 20, text = s => s, color = _ => Theme.Text2 } };
@@ -445,13 +483,133 @@ namespace TradeHelper.Ui
         void ShowPath()
         {
             var d = cfg.DataDir;
-            path.text = "当前位置：" + System.IO.Path.Combine(d, "latest.json") + (cfg.dataDirMode != 0 && d == Config.Dir ? "   <color=#D66079>（选的文件夹不能用，暂时放回默认位置）</color>" : "");
+            path.text = "现在写到：" + d + (cfg.dataDirMode != 0 && d == Config.Dir ? "   <color=#D66079>（选的文件夹建不了，暂时写回默认位置；看看路径对不对）</color>" : "");
+        }
+
+        void Applied()
+        {
+            ShowPath();
+            var d = cfg.DataDir;
+            bool ok = cfg.dataDirMode == 0 || d != Config.Dir;
+            hint.text = ok ? "<color=#4AC37D>已切换，正在导出一次 latest.json 到这里。</color>" : "";
+            if (ok) host.ExportNow();
+        }
+
+        public override void Tick()
+        {
+            if (Time.unscaledTime < nextPerf) return;
+            nextPerf = Time.unscaledTime + 1f;
+            perf.text = (string.IsNullOrEmpty(Perf.LastSummary) ? "（30 秒后出第一行）" : Perf.LastSummary) + "\n" + Perf.LastScan;
         }
 
         public override void OnSnapshot(Snapshot s)
         {
             base.OnSnapshot(s);
             errors.SetData(s.errors);
+        }
+    }
+}
+
+namespace TradeHelper.Ui
+{
+    // Trades the player follows: live re-pricing of both stations, purchase detection, profit history and the best
+    // places to sell the holding right now.
+    public class PlansView : ViewBase
+    {
+        readonly Table<Plan> table;
+        readonly TextMeshProUGUI detail;
+        Plan selected;
+        int show;
+
+        static string Signed(double v) => (v >= 0 ? "+" : "") + Fmt.Money(v);
+
+        static string Change(Plan p)
+        {
+            if (double.IsNaN(p.CurProfit) || p.PlanProfit == 0) return "?";
+            double d = (p.CurProfit - p.PlanProfit) / Math.Abs(p.PlanProfit) * 100;
+            return (d >= 0 ? "+" : "") + d.ToString("0") + "%";
+        }
+
+        static Color ChangeColor(Plan p)
+        {
+            if (double.IsNaN(p.CurProfit)) return Theme.Text2;
+            return p.CurProfit >= p.PlanProfit ? Theme.Good : (p.CurProfit > 0 ? Theme.Warn : Theme.Bad);
+        }
+
+        static string Station(string name, MarketInfo m) => m == null ? name : name + (m.Exact ? "" : " · " + m.Freshness);
+
+        public PlansView(Window w, RectTransform body, Config cfg, TradeHelperBehaviour host) : base(w, body, cfg, host)
+        {
+            Kit.TxtAt(root, "在“跑商建议”或“卖库存”里点「追踪」加入。勾着「两站实时」时，计划用到的站会自动保持实时（每天补算，效果同打开交易所），路上价格怎么变这里都看得到；买到货后自动切换成“已买入”，继续盯卖出站。", 0, 0, w.BodyW, 24, 14, Theme.Text2);
+            Drop("显示：", 0, 30, 230, new List<string> { "进行中", "全部", "已完成" }, 0, i => { show = i; table.Resort(); });
+            Kit.Button(root, "删除所有已完成", 238, 30, 230, 32, () =>
+            {
+                foreach (var p in new List<Plan>(Plans.list)) if (p.state == 2) Plans.Remove(p, cfg);
+                Refresh();
+            });
+            var cols = new List<Column<Plan>>
+            {
+                new Column<Plan> { title = "商品", width = 130, text = p => p.name, key = p => p.name },
+                new Column<Plan> { title = "数量", width = 56, text = p => p.HoldQty.ToString(), key = p => p.HoldQty, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<Plan> { title = "状态", width = 104, text = p => p.StateText, key = p => p.state, numeric = true, color = p => p.state == 0 ? Theme.Accent : p.state == 1 ? Theme.Good : Theme.Text2 },
+                new Column<Plan> { title = "在哪买", width = 176, text = p => Station(p.buyName, p.buyMarket), key = p => p.buyName, color = p => p.buyMarket != null ? Fmt.FreshColor(p.buyMarket) : Theme.Text2 },
+                new Column<Plan> { title = "去哪卖", width = 176, text = p => Station(p.sellName, p.sellMarket), key = p => p.sellName, color = p => p.sellMarket != null ? Fmt.FreshColor(p.sellMarket) : Theme.Text2 },
+                new Column<Plan> { title = "计划净赚", width = 96, text = p => Fmt.Money(p.PlanProfit), key = p => p.PlanProfit, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<Plan> { title = "现在净赚", width = 96, text = p => double.IsNaN(p.CurProfit) ? "?" : Fmt.Money(p.CurProfit), key = p => double.IsNaN(p.CurProfit) ? (IComparable)null : p.CurProfit, numeric = true, align = TextAlignmentOptions.MidlineRight, color = ChangeColor },
+                new Column<Plan> { title = "变化", width = 70, text = Change, key = p => double.IsNaN(p.CurProfit) ? (IComparable)null : p.CurProfit - p.PlanProfit, numeric = true, align = TextAlignmentOptions.MidlineRight, color = ChangeColor },
+                new Column<Plan> { title = "现在最好卖到", width = 176, text = p => p.alternatives.Count > 0 ? p.alternatives[0].Key.name : "?", key = p => p.alternatives.Count > 0 ? p.alternatives[0].Key.name : null },
+                new Column<Plan> { title = "舰队→下一站", width = 104, text = p => Fmt.Dist(p.fleetToNextAu), key = p => p.fleetToNextAu < 0 ? (IComparable)null : p.fleetToNextAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<Plan> { title = "两站实时", width = 92, checkGet = p => p.keepFresh, checkSet = (p, v) => { p.keepFresh = v; Plans.ApplyKeepFresh(p, cfg, host.settlement); Plans.Save(); } },
+                new Column<Plan> { title = "进度", width = 92, buttonText = p => p.state == 0 ? "已买入" : p.state == 1 ? "已卖完" : "已完成", buttonEnabled = p => p.state != 2,
+                    onButton = p => { if (p.state == 0) Plans.MarkBought(p, cfg, host.settlement); else if (p.state == 1) Plans.MarkDone(p, cfg); Refresh(); } },
+                new Column<Plan> { title = "", width = 70, buttonText = _ => "删除", onButton = p => { Plans.Remove(p, cfg); if (selected == p) selected = null; Refresh(); } },
+            };
+            table = new Table<Plan>(root, 0, 70, w.BodyW, w.BodyH - 70 - 190, cols, 2, false);
+            table.emptyText = "还没有追踪的计划。在“跑商建议”或“卖库存”里点「追踪」。";
+            table.filter = p => show == 1 || (show == 0 && p.state != 2) || (show == 2 && p.state == 2);
+            table.onRowClick = p => { selected = p; ShowDetail(); };
+            table.isSelected = p => p == selected;
+            var box = Kit.Place(Kit.New("Detail", root), 0, w.BodyH - 182, w.BodyW, 182);
+            Kit.Img(box, Theme.Box, Theme.HeadBg);
+            detail = Kit.Txt(box, "", 15, Theme.Text, TextAlignmentOptions.TopLeft);
+            Kit.Stretch(detail.rectTransform, 12, 8, 12, 8);
+            detail.enableWordWrapping = true;
+            detail.overflowMode = TextOverflowModes.Truncate;
+        }
+
+        void Refresh() { table.SetData(new List<Plan>(Plans.list)); ShowDetail(); }
+
+        void ShowDetail()
+        {
+            var p = selected;
+            if (p == null || !Plans.list.Contains(p)) { detail.text = "<color=#A4A5A6>点一行看这个计划的细节：计划时和现在的价格、利润变化记录、现在卖到哪最好。</color>"; return; }
+            var sb = new System.Text.StringBuilder();
+            sb.Append("<b>").Append(p.name).Append(" × ").Append(p.HoldQty).Append("</b>   ").Append(p.StateText).Append("   计划于 ").Append(p.createdAt).Append('\n');
+            sb.Append("计划时：成本 ").Append(Fmt.Money(p.planCost)).Append("  到手 ").Append(Fmt.Money(p.planRevenue)).Append("  净赚 ").Append(Fmt.Money(p.PlanProfit)).Append('\n');
+            sb.Append("现在：").Append(p.state == 0 ? "成本 " + (double.IsNaN(p.curCost) ? "?" : Fmt.Money(p.curCost)) + "  " : "成本按计划 ").Append("到手 ")
+              .Append(double.IsNaN(p.curRevenue) ? "?" : Fmt.Money(p.curRevenue)).Append("  净赚 ").Append(double.IsNaN(p.CurProfit) ? "?" : Fmt.Money(p.CurProfit))
+              .Append("（").Append(Change(p)).Append("）");
+            if (p.buyMarket != null && p.state == 0) sb.Append("   买入站").Append(p.buyMarket.Exact ? "实时" : p.buyMarket.Freshness);
+            if (p.sellMarket != null) sb.Append("   卖出站").Append(p.sellMarket.Exact ? "实时" : p.sellMarket.Freshness);
+            sb.Append('\n');
+            if (!string.IsNullOrEmpty(p.note)) sb.Append("<color=#D8982F>").Append(p.note).Append("</color>\n");
+            sb.Append("现在卖 ").Append(p.HoldQty).Append(" 个最好的站：");
+            for (int i = 0; i < Math.Min(4, p.alternatives.Count); i++)
+                sb.Append(i == 0 ? "" : "；").Append(p.alternatives[i].Key.name).Append(" ").Append(Fmt.Money(p.alternatives[i].Value))
+                  .Append(p.alternatives[i].Key.Exact ? "" : "(估)");
+            sb.Append('\n');
+            sb.Append("利润记录：");
+            int from = Math.Max(0, p.history.Count - 8);
+            for (int i = from; i < p.history.Count; i++)
+                sb.Append(i == from ? "" : " → ").Append(p.history[i].time).Append(" ").Append(Fmt.Money(p.history[i].profit));
+            if (p.history.Count == 0) sb.Append("还没有");
+            detail.text = sb.ToString();
+        }
+
+        public override void OnSnapshot(Snapshot s)
+        {
+            base.OnSnapshot(s);
+            Refresh();
         }
     }
 }

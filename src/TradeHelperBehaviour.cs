@@ -8,7 +8,7 @@ namespace TradeHelper
 {
     public class TradeHelperBehaviour : MonoBehaviour
     {
-        public const string Version = "0.2.0";
+        public const string Version = "0.3.0";
         public static TradeHelperBehaviour Instance;
 
         Config cfg;
@@ -21,11 +21,13 @@ namespace TradeHelper
         bool exportAfterScan, refreshAfterSettlement;
         string lastStatus = "";
         FWGameData seenGame;
+        float openWaitStart = -1;
 
         void Awake()
         {
             Instance = this;
             cfg = Config.Load();
+            Plans.Load();
             nextExport = Time.unscaledTime + 60f;
             settlement.MarketFinished += _ => refreshAfterSettlement = true;
         }
@@ -36,6 +38,7 @@ namespace TradeHelper
             {
                 if (window == null) { window = new Ui.Window(this, cfg); window.Build(); if (latest != null) window.OnSnapshot(latest); }
                 window.canvasGo.SetActive(true);
+                if (latest == null && openWaitStart < 0) openWaitStart = Time.unscaledTime;
                 if (latest == null || (DateTime.Now - latest.takenAt).TotalSeconds > 5) RequestRefresh(false);
                 UpdateStatus();
             }
@@ -80,6 +83,13 @@ namespace TradeHelper
             finally { if (tex != null) Destroy(tex); }
         }
 
+        // A plan was added from a table: re-price plans now and refresh the tables that show "追踪中".
+        public void PlansChanged()
+        {
+            if (latest != null) { long t = Perf.Now; Plans.Track(latest, cfg, settlement); Perf.Add(Perf.Cat.Plans, t); }
+            if (window != null) window.RefreshViews();
+        }
+
         public void ExportNow()
         {
             if (latest == null) { exportAfterScan = true; RequestRefresh(false); return; }
@@ -96,7 +106,10 @@ namespace TradeHelper
         {
             if (job == null) return;
             jobFrames++;
-            Budget.StartFrame(Mathf.Max(1f, cfg.scanMsPerFrame));
+            // Twice the budget while the panel is open with nothing to show yet.
+            float budget = Mathf.Max(1f, cfg.scanMsPerFrame) * (Visible && latest == null ? 2f : 1f);
+            Budget.StartFrame(budget);
+            long pt = Perf.Now;
             try
             {
                 while (!Budget.Over)
@@ -105,8 +118,19 @@ namespace TradeHelper
                     {
                         job = null;
                         latest = building; building = null;
-                        Debug.Log("[TradeHelper] scan done: " + latest.markets.Count + " markets, " + latest.trades.Count + " trades, " + latest.sells.Count + " sells, " +
-                                  latest.scanMs + " ms over " + jobFrames + " frames; " + Budget.Report());
+                        var line = "扫描完成 " + DateTime.Now.ToString("HH:mm:ss") + "：" + latest.markets.Count + " 站, " + latest.trades.Count + " 条跑商, " + latest.sells.Count + " 条卖货, 用时 " +
+                                   latest.scanMs + "ms 分 " + jobFrames + " 帧（每帧上限 " + budget.ToString("0") + "ms）; " + Budget.Report();
+                        Perf.LastScan = line;
+                        Perf.Write(line, cfg);
+                        Debug.Log("[TradeHelper] " + line);
+                        long tp = Perf.Now;
+                        Plans.Track(latest, cfg, settlement);
+                        Perf.Add(Perf.Cat.Plans, tp);
+                        if (openWaitStart >= 0)
+                        {
+                            Perf.Write("首次打开面板等数据 " + (Time.unscaledTime - openWaitStart).ToString("0.0") + " 秒", cfg);
+                            openWaitStart = -1;
+                        }
                         if (window != null) window.OnSnapshot(latest);
                         if (exportAfterScan) { exportAfterScan = false; DoExport(latest); }
                         break;
@@ -119,6 +143,7 @@ namespace TradeHelper
                 lastStatus = "刷新失败: " + e.Message;
                 Debug.LogWarning("[TradeHelper] scan: " + e);
             }
+            Perf.Add(Perf.Cat.Scan, pt);
         }
 
         void UpdateStatus()
@@ -126,7 +151,7 @@ namespace TradeHelper
             if (window == null) return;
             string s = "";
             if (latest != null) s = "信用点 " + Ui.Fmt.Money(latest.credits) + "   舰队在 " + latest.GalaxyName(latest.fleetGalaxyId) + "   ";
-            if (job != null) s += "正在刷新…";
+            if (job != null) s += (latest == null ? "首次读取中 " : "正在刷新 ") + (building != null ? building.marketsDone + "/" + building.marketsTotal + " 站" : "…");
             else if (latest != null) s += "刷新于 " + latest.takenAt.ToString("HH:mm:ss") + "（" + latest.scanMs + " ms，分 " + jobFrames + " 帧）";
             if (settlement.Pending > 0) s += "   后台补算 " + settlement.Pending + " 站";
             if (!string.IsNullOrEmpty(lastStatus)) s += "   " + lastStatus;
@@ -144,6 +169,7 @@ namespace TradeHelper
                     seenGame = gd;
                     job = null; building = null; latest = null;
                     settlement.Clear();
+                    MarketScanner.ClearCache();
                     if (window != null) window.snap = null;
                     if (gd != null && Visible) RequestRefresh(true);
                 }
@@ -156,14 +182,20 @@ namespace TradeHelper
                 if (themeAt < 0) themeAt = Time.unscaledTime + 5f;
                 else if (themeAt > 0 && Time.unscaledTime >= themeAt) { themeAt = 0; try { Ui.Theme.Load(); } catch (Exception e) { Debug.LogWarning("[TradeHelper] theme: " + e); } }
 
+                long t0 = Perf.Now;
                 settlement.Tick(cfg);
+                Perf.Add(Perf.Cat.Settle, t0);
                 if (refreshAfterSettlement && settlement.Pending == 0 && Visible) { refreshAfterSettlement = false; RequestRefresh(false); }
+                // Read the markets in the background right after a save loads, so the first F8 already has data.
+                if (latest == null && job == null && themeAt == 0) RequestRefresh(false);
                 PumpJob();
                 if (Visible)
                 {
+                    long tu = Perf.Now;
                     if (cfg.autoRefreshSeconds > 0 && Time.unscaledTime >= nextAutoRefresh) RequestRefresh(false);
                     window.Tick();
                     UpdateStatus();
+                    Perf.Add(Perf.Cat.Ui, tu);
                 }
                 if (cfg.exportEverySeconds > 0 && Time.unscaledTime >= nextExport)
                 {
@@ -171,6 +203,7 @@ namespace TradeHelper
                     exportAfterScan = true;
                     RequestRefresh(false);
                 }
+                Perf.EndFrame(cfg);
             }
             catch (Exception e) { Debug.LogWarning("[TradeHelper] update: " + e); }
         }
@@ -187,6 +220,12 @@ namespace TradeHelper
         }
 
         void OnGUI()
+        {
+            long t = Perf.Now;
+            try { HotkeyCheck(); } finally { Perf.Add(Perf.Cat.Gui, t); }
+        }
+
+        void HotkeyCheck()
         {
             var e = Event.current;
             if (e == null || e.type != EventType.KeyDown || e.keyCode != cfg.HotkeyCode) return;
