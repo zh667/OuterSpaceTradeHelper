@@ -44,6 +44,8 @@ namespace TradeHelper
         [JsonIgnore] [NonSerialized] public List<KeyValuePair<MarketInfo, double>> alternatives = new List<KeyValuePair<MarketInfo, double>>();
         [JsonIgnore] [NonSerialized] public double fleetToNextAu = -1;
         [JsonIgnore] [NonSerialized] public string note = "";
+        // Units of the same goods that other open plans sell (or buy) at the same station before this one.
+        [JsonIgnore] [NonSerialized] public int sellAhead, buyAhead;
         [JsonIgnore] [NonSerialized] public DateTime lastPointAt = DateTime.MinValue;
 
         [JsonIgnore] public double PlanProfit => planRevenue - planCost;
@@ -216,9 +218,28 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
         public static void Track(Snapshot snap, Config cfg, Settlement st)
         {
             bool changed = false;
-            foreach (var p in list)
+            // Plans that sell (or buy) the same goods at the same station share that station's price curve: the second
+            // batch sells after the first has pushed the price down. Price them in queue order: goods already in hand
+            // first, then plans still to buy; inside each group, older plans first. No recovery between the batches is
+            // assumed (the station's daily consumption would only make the later batch a little better).
+            var order = new List<Plan>(list);
+            var pos = new Dictionary<Plan, int>();
+            for (int i = 0; i < list.Count; i++) pos[list[i]] = i;
+            order.Sort((a, b) =>
+            {
+                int c = (a.state == 0 ? 1 : 0).CompareTo(b.state == 0 ? 1 : 0);
+                if (c == 0) c = a.createdMM.CompareTo(b.createdMM);
+                return c != 0 ? c : pos[a].CompareTo(pos[b]);
+            });
+            var soldAhead = new Dictionary<string, int>();
+            var boughtAhead = new Dictionary<string, int>();
+            var sellTotal = new Dictionary<string, int>();
+            foreach (var o in list)
+                if (o.state != 2) { var k = o.sellUid + "|" + o.gid; int v; sellTotal.TryGetValue(k, out v); sellTotal[k] = v + o.HoldQty; }
+            foreach (var p in order)
             {
                 p.note = "";
+                p.sellAhead = p.buyAhead = 0;
                 p.buyMarket = snap.markets.Find(m => m.uid == p.buyUid);
                 p.sellMarket = snap.markets.Find(m => m.uid == p.sellUid);
                 p.owned = snap.Owned(p.key);
@@ -263,14 +284,23 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                     else
                     {
                         p.buyStock = bq.stock;
-                        // If the station now has fewer than planned, price what can actually be bought.
-                        hold = Math.Min(p.qty, Math.Max(0, bq.stock));
-                        p.curCost = hold > 0 ? bq.BuyCost(hold) : double.NaN;
-                        if (bq.stock < p.qty) p.note = "买入站库存只剩 " + bq.stock + " 个（按能买到的数量算）";
+                        var bk = p.buyUid + "|" + p.gid;
+                        int ob; boughtAhead.TryGetValue(bk, out ob);
+                        p.buyAhead = ob;
+                        // If the station now has fewer than planned (after earlier plans' share), price what can actually be bought.
+                        int avail = Math.Max(0, bq.stock - ob);
+                        hold = Math.Min(p.qty, avail);
+                        p.curCost = hold > 0 ? bq.BuyCost(ob + hold) - bq.BuyCost(ob) : double.NaN;
+                        boughtAhead[bk] = ob + hold;
+                        if (avail < p.qty) p.note = "买入站库存只剩 " + bq.stock + " 个" + (ob > 0 ? "（其中 " + ob + " 个归前面的计划）" : "") + "，按能买到的 " + hold + " 个算";
                         if (bq.contraband) p.note = "买入站现在把它列为违禁品，买不了";
                     }
                 }
-                p.curRevenue = sq != null && !sq.contraband && hold > 0 ? sq.SellRevenue(hold) : double.NaN;
+                var sk = p.sellUid + "|" + p.gid;
+                int os = 0;
+                if (p.state != 2) { soldAhead.TryGetValue(sk, out os); soldAhead[sk] = os + hold; }
+                p.sellAhead = os;
+                p.curRevenue = sq != null && !sq.contraband && hold > 0 ? sq.SellRevenue(os + hold) - sq.SellRevenue(os) : double.NaN;
                 if (sq != null && sq.contraband) p.note = "卖出站现在把它列为违禁品，卖不了";
                 if (p.sellMarket != null && p.sellMarket.planet && p.state != 2)
                     p.note = "注意：卖出站是星球的地面交易行，舰队不能直接卖（" + p.sellMarket.where + "）。看下面“现在卖最好的站”换一个。";
@@ -283,7 +313,13 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                     if (!m.byGid.TryGetValue(p.gid, out q) || q.contraband) continue;
                     if (m.planet && !cfg.includeGround) continue;
                     if (!m.Discovered && !cfg.includeUndiscovered) continue;
-                    if (hold > 0) p.alternatives.Add(new KeyValuePair<MarketInfo, double>(m, q.SellRevenue(hold)));
+                    if (hold <= 0) continue;
+                    // At its own sell station the plan keeps its queue place; anywhere else every other plan selling the same
+                    // goods there is counted as selling first (the cautious case).
+                    int oa;
+                    if (m.uid == p.sellUid) oa = os;
+                    else { sellTotal.TryGetValue(m.uid + "|" + p.gid, out oa); }
+                    p.alternatives.Add(new KeyValuePair<MarketInfo, double>(m, q.SellRevenue(oa + hold) - q.SellRevenue(oa)));
                 }
                 p.alternatives.Sort((a, b) => b.Value.CompareTo(a.Value));
                 if (p.alternatives.Count > 5) p.alternatives.RemoveRange(5, p.alternatives.Count - 5);

@@ -8,7 +8,7 @@ namespace TradeHelper
 {
     public class TradeHelperBehaviour : MonoBehaviour
     {
-        public const string Version = "0.3.3";
+        public const string Version = "0.3.4";
         public static TradeHelperBehaviour Instance;
 
         Config cfg;

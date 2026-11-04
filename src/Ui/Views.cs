@@ -547,7 +547,7 @@ namespace TradeHelper.Ui
 
         public PlansView(Window w, RectTransform body, Config cfg, TradeHelperBehaviour host) : base(w, body, cfg, host)
         {
-            Kit.TxtAt(root, "在“跑商建议”或“卖库存”里点「追踪」加入。状态：① 待买入 →（库存里多出这批货时自动）② 已买，待卖 →（卖掉后点「改为已完成」）③ 已完成。最右边「手动改状态」是按钮，不是状态", 0, 0, w.BodyW, 24, 14, Theme.Text2);
+            Kit.TxtAt(root, "状态：① 待买入 →（库存多出这批货时自动）② 已买，待卖 →（卖掉后点「改为已完成」）③ 已完成；「手动改状态」是按钮。* = 同站同货还有别的计划，已按排队后被压低的价格算", 0, 0, w.BodyW, 24, 14, Theme.Text2);
             Drop("显示：", 0, 30, 230, new List<string> { "进行中", "全部", "已完成" }, 0, i => { show = i; table.Resort(); });
             Kit.Button(root, "删除所有已完成", 238, 30, 230, 32, () =>
             {
@@ -562,7 +562,7 @@ namespace TradeHelper.Ui
                 new Column<Plan> { title = "在哪买", width = 176, text = p => Station(p.buyName, p.buyMarket), key = p => p.buyName, color = p => p.buyMarket != null ? Fmt.FreshColor(p.buyMarket) : Theme.Text2 },
                 new Column<Plan> { title = "去哪卖", width = 176, text = p => Station(p.sellName, p.sellMarket), key = p => p.sellName, color = p => p.sellMarket != null ? Fmt.FreshColor(p.sellMarket) : Theme.Text2 },
                 new Column<Plan> { title = "计划净赚", width = 96, text = p => Fmt.Money(p.PlanProfit), key = p => p.PlanProfit, numeric = true, align = TextAlignmentOptions.MidlineRight },
-                new Column<Plan> { title = "现在净赚", width = 96, text = p => double.IsNaN(p.CurProfit) ? "?" : Fmt.Money(p.CurProfit), key = p => double.IsNaN(p.CurProfit) ? (IComparable)null : p.CurProfit, numeric = true, align = TextAlignmentOptions.MidlineRight, color = ChangeColor },
+                new Column<Plan> { title = "现在净赚", width = 96, text = p => double.IsNaN(p.CurProfit) ? "?" : Fmt.Money(p.CurProfit) + (p.sellAhead > 0 || p.buyAhead > 0 ? "*" : ""), key = p => double.IsNaN(p.CurProfit) ? (IComparable)null : p.CurProfit, numeric = true, align = TextAlignmentOptions.MidlineRight, color = ChangeColor },
                 new Column<Plan> { title = "变化", width = 70, text = Change, key = p => double.IsNaN(p.CurProfit) ? (IComparable)null : p.CurProfit - p.PlanProfit, numeric = true, align = TextAlignmentOptions.MidlineRight, color = ChangeColor },
                 new Column<Plan> { title = "现在最好卖到", width = 176, text = p => p.alternatives.Count > 0 ? p.alternatives[0].Key.name : "?", key = p => p.alternatives.Count > 0 ? p.alternatives[0].Key.name : null },
                 new Column<Plan> { title = "舰队→下一站", width = 104, text = p => Fmt.Dist(p.fleetToNextAu), key = p => p.fleetToNextAu < 0 ? (IComparable)null : p.fleetToNextAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
@@ -603,6 +603,9 @@ namespace TradeHelper.Ui
             if (p.state >= 1 && p.buyUid >= 0)
                 sb.Append(p.autoBought ? "已在库存里看到 " + p.boughtQty + " 个（" + p.boughtAt + " 自动识别为已买入）" : "已买入（" + (p.boughtAt ?? "") + " 手动标记）")
                   .Append("，下一步：到 ").Append(p.sellName).Append(" 卖出\n");
+            if (p.sellAhead > 0 || p.buyAhead > 0)
+                sb.Append("<color=#D8982F>同站同货有别的计划排在前面：").Append(p.sellAhead > 0 ? "卖出站先有 " + p.sellAhead + " 个要卖，" : "").Append(p.buyAhead > 0 ? "买入站先有 " + p.buyAhead + " 个要买，" : "")
+                  .Append("这里的价格已按被它们压过之后算（顺序：已买/持有的先，再按加入先后）</color>\n");
             if (!string.IsNullOrEmpty(p.note)) sb.Append("<color=#D8982F>").Append(p.note).Append("</color>\n");
             sb.Append("现在卖 ").Append(p.HoldQty).Append(" 个最好的站：");
             for (int i = 0; i < Math.Min(4, p.alternatives.Count); i++)
