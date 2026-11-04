@@ -126,7 +126,8 @@ namespace TradeHelper.Ui
             table.sortChanged = (c, d) => SaveSort();
         }
 
-        static bool SellTracked(SellIdea s) => Plans.list.Exists(p => p.state != 2 && p.key == s.key && p.sellUid == s.market.market.uid);
+        // Only plans made from stock already held count; a plan to buy more of the same goods is a different plan.
+        static bool SellTracked(SellIdea s) => Plans.list.Exists(p => p.state != 2 && p.buyUid < 0 && p.key == s.key && p.sellUid == s.market.market.uid && (p.fromLocation == null || p.fromLocation == s.location));
 
         void SaveSort() { cfg.sellsSort = table.sortCol; cfg.sellsDesc = table.desc; cfg.Save(); }
 

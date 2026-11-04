@@ -33,6 +33,7 @@ namespace TradeHelper
         public bool keepFresh = true;
         public List<long> addedKeepFresh = new List<long>();
         public List<PlanPoint> history = new List<PlanPoint>();
+        public string fromLocation;             // plans from held stock: where the stock is (e.g. 灾厄舰队（舰队货仓）)
         public bool autoBought;                 // the purchase was seen in the inventory (not marked by hand)
         public string boughtAt;
 
@@ -158,7 +159,7 @@ namespace TradeHelper
             {
                 id = Guid.NewGuid().ToString("N"), gid = s.market.gid, key = s.key, name = s.name, qty = s.qty,
                 sellUid = s.market.market.uid, sellName = s.market.market.name, sellGalaxy = s.market.market.galaxyId,
-                buyName = "（已持有）", createdAt = DateTime.Now.ToString("MM-dd HH:mm"), createdMM = GameMM(),
+buyName = "（持有·" + s.location + "）", fromLocation = s.location, createdAt = DateTime.Now.ToString("MM-dd HH:mm"), createdMM = GameMM(),
                 planCost = 0, planRevenue = s.revenue, ownedAtStart = snap.Owned(s.key), state = 1, boughtQty = s.qty,
             };
             list.Add(p);
@@ -228,6 +229,9 @@ namespace TradeHelper
                 if (p.buyMarket != null) p.buyMarket.byGid.TryGetValue(p.gid, out bq);
                 if (p.sellMarket != null) p.sellMarket.byGid.TryGetValue(p.gid, out sq);
 
+                // The baseline for spotting the purchase is the lowest holding seen while waiting to buy: if the player
+                // sells some of the same goods first, buying afterwards must still count in full.
+                if (p.state == 0 && p.owned < p.ownedAtStart) { p.ownedAtStart = p.owned; changed = true; }
                 // Detect the purchase from the inventory: the holding grew since the plan was made.
                 if (p.state == 0 && p.owned - p.ownedAtStart >= 1)
                 {
@@ -237,6 +241,13 @@ namespace TradeHelper
                     p.autoBought = true;
                     p.boughtAt = DateTime.Now.ToString("MM-dd HH:mm");
                     ReleaseBuySide(p, cfg);
+                    changed = true;
+                }
+                else if (p.state == 1 && p.buyUid >= 0 && p.autoBought && p.boughtQty < p.qty && p.owned - p.ownedAtStart > p.boughtQty)
+                {
+                    // Bought in more than one go: follow the holding up to the planned quantity.
+                    p.boughtQty = Math.Min(p.qty, p.owned - p.ownedAtStart);
+                    version++;
                     changed = true;
                 }
                 else if (p.state == 1 && p.buyUid >= 0 && p.owned <= p.ownedAtStart)
