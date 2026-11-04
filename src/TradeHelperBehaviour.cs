@@ -67,7 +67,7 @@ namespace TradeHelper
             Texture2D tex = null;
             try
             {
-                var dir = System.IO.Path.Combine(Config.Dir, "shots");
+                var dir = System.IO.Path.Combine(cfg.DataDir, "shots");
                 System.IO.Directory.CreateDirectory(dir);
                 var p = System.IO.Path.Combine(dir, DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".png");
                 tex = new Texture2D(Screen.width, Screen.height, TextureFormat.RGB24, false);
@@ -88,7 +88,7 @@ namespace TradeHelper
 
         void DoExport(Snapshot s)
         {
-            try { lastStatus = "已导出 " + Export.Write(s, s.trades, s.sells); }
+            try { lastStatus = "已导出 " + Export.Write(s, s.trades, s.sells, cfg.DataDir); }
             catch (Exception e) { lastStatus = "导出失败: " + e.Message; }
         }
 

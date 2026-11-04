@@ -8,7 +8,7 @@
 - **各站市场**：每个站的库存、买一个（含税）、卖一个（到手）、税率、能否买、违禁；价格标“实时”或“估”。
 - **我的库存**：按位置/类别汇总。
 - **后台补算**：选择要补算/初始化的空间站（含“一键初始化所有未开过的站”“保持实时”）。调用游戏自带的 `ReleasePendingSettlementBatch` 每帧算一点，效果等于你打开了那个站。
-- **导出**：`%USERPROFILE%/AppData/LocalLow/CatStudio/Outer Space/TradeHelper/latest.json`。
+- **导出**：`latest.json` 和截图默认在 `%USERPROFILE%/AppData/LocalLow/CatStudio/Outer Space/TradeHelper/`，可在设置页改到游戏目录里本模组的 `data` 文件夹或任意文件夹（`config.json` 固定在默认位置）。
 
 ## 准确性
 - 站点没有欠结算天数时，价格直接来自游戏自己的计价函数（`GetBasePriceFactor`、`QuoteTrade`、`getPBase`、`getTaxRate`、`getEPool`），与游戏交易所一致。

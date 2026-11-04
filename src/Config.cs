@@ -30,9 +30,41 @@ namespace TradeHelper
         public bool goodsBuyableOnly = false;
         public bool hideContraband = true;
 
+        // Where latest.json and screenshots go: 0 = the game's data folder on C: (LocalLow), 1 = inside the mod's own
+        // folder in the game directory (<game>/mods/TradeHelper/data), 2 = a folder the player typed.
+        public int dataDirMode = 0;
+        public string dataDirCustom = "";
+
         [NonSerialized] public string path;
 
+        // config.json itself always stays here so the mod can find it before knowing the player's choice.
         public static string Dir => Path.Combine(Application.persistentDataPath, "TradeHelper");
+
+        public static string GameModDataDir
+        {
+            get
+            {
+                try { return Path.Combine(Directory.GetParent(Application.dataPath).FullName, "mods", "TradeHelper", "data"); }
+                catch { return null; }
+            }
+        }
+
+        // Resolved export folder; falls back to Dir when the chosen one is unusable.
+        public string DataDir
+        {
+            get
+            {
+                string d = null;
+                if (dataDirMode == 1) d = GameModDataDir;
+                else if (dataDirMode == 2 && !string.IsNullOrEmpty(dataDirCustom))
+                {
+                    try { if (Path.IsPathRooted(dataDirCustom.Trim())) d = dataDirCustom.Trim(); } catch { }
+                }
+                if (string.IsNullOrEmpty(d)) return Dir;
+                try { Directory.CreateDirectory(d); return d; }
+                catch (Exception e) { Debug.LogWarning("[TradeHelper] data folder unusable (" + d + "): " + e.Message); return Dir; }
+            }
+        }
 
         public static Config Load()
         {

@@ -403,7 +403,16 @@ namespace TradeHelper.Ui
                 i => { cfg.exportEverySeconds = ExportOpts[i]; cfg.Save(); });
             Kit.Button(root, "立即导出", 430, y, 120, 30, () => host.ExportNow(), true);
             y += 42;
-            path = Kit.TxtAt(root, "数据文件：" + System.IO.Path.Combine(Config.Dir, "latest.json"), 0, y, w.BodyW, 26, 14, Theme.Text2);
+            Drop("数据文件和截图放在：", 0, y, 420, new List<string> { "C 盘游戏数据目录（默认）", "游戏目录里本模组的文件夹", "自定义文件夹" }, Mathf.Clamp(cfg.dataDirMode, 0, 2),
+                i => { cfg.dataDirMode = i; cfg.Save(); ShowPath(); });
+            var custom = Kit.Input(root, "例如 E:\\OuterSpaceTrade", 430, y, 420, 30, null);
+            custom.text = cfg.dataDirCustom ?? "";
+            Kit.Button(root, "用这个文件夹", 858, y, 140, 30, () => { cfg.dataDirCustom = custom.text.Trim(); cfg.dataDirMode = 2; cfg.Save(); ShowPath(); });
+            y += 36;
+            path = Kit.TxtAt(root, "", 0, y, w.BodyW, 26, 14, Theme.Text2);
+            ShowPath();
+            y += 30;
+            Kit.TxtAt(root, "放在游戏目录里不影响游戏：游戏只读取模组文件夹里的 Manifest 和程序文件，Steam 校验和更新也不会删除多出来的文件。配置文件 config.json 固定留在 C 盘游戏数据目录。", 0, y, w.BodyW, 26, 14, Theme.Text2);
             y += 36;
             Kit.TxtAt(root, "距离和游戏一样按星门航线算（AU；超过 1 光年显示 ly）。“舰队→某站”= 你的舰队现在所在星系到那个站所在星系的航程。", 0, y, w.BodyW, 26, 14, Theme.Text2);
             y += 36;
@@ -411,6 +420,12 @@ namespace TradeHelper.Ui
             y += 34;
             var cols = new List<Column<string>> { new Column<string> { title = "内容", width = w.BodyW - 20, text = s => s, color = _ => Theme.Text2 } };
             errors = new Table<string>(root, 0, y, w.BodyW, w.BodyH - y, cols, -1, false) { emptyText = "没有" };
+        }
+
+        void ShowPath()
+        {
+            var d = cfg.DataDir;
+            path.text = "当前位置：" + System.IO.Path.Combine(d, "latest.json") + (cfg.dataDirMode != 0 && d == Config.Dir ? "   <color=#D66079>（选的文件夹不能用，暂时放回默认位置）</color>" : "");
         }
 
         public override void OnSnapshot(Snapshot s)

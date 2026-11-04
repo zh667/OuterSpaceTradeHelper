@@ -25,7 +25,7 @@ namespace TradeHelper
 
         static string N(double v) => double.IsNaN(v) || double.IsInfinity(v) ? "null" : Math.Round(v, 2).ToString(CultureInfo.InvariantCulture);
 
-        public static string Write(Snapshot snap, List<TradeIdea> ideas, List<SellIdea> sells)
+        public static string Write(Snapshot snap, List<TradeIdea> ideas, List<SellIdea> sells, string dir)
         {
             var sb = new StringBuilder();
             sb.Append("{\"version\":").Append(S(TradeHelperBehaviour.Version))
@@ -92,8 +92,8 @@ namespace TradeHelper
             sb.Append("],\"errors\":[");
             for (int i = 0; i < snap.errors.Count; i++) { if (i > 0) sb.Append(','); sb.Append(S(snap.errors[i])); }
             sb.Append("]}");
-            Directory.CreateDirectory(Config.Dir);
-            var path = Path.Combine(Config.Dir, "latest.json");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "latest.json");
             File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
             return path;
         }
