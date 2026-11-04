@@ -122,7 +122,7 @@ namespace TradeHelper.Ui
 
         public RectTransform PopupLayer => popupLayer;
 
-        void SelectTab(int t)
+        public void SelectTab(int t)
         {
             Kit.Drop.CloseAll?.Invoke();
             tab = t;

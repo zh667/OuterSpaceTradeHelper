@@ -40,6 +40,7 @@ namespace TradeHelper
         public int soldQty;                     // units of this plan that have left the inventory since
         public double soldRevenue;              // estimate for those units at the time they left (actual when known)
         public bool autoDone;                   // completed automatically
+        public bool actualPaid;                 // soldRevenue is what the game's trade records say was paid
         public string doneAt, doneNote;
 
         // Live values (not saved).
@@ -241,7 +242,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
         {
             p.state = 1;
             p.soldQty = 0; p.soldRevenue = 0;
-            p.autoDone = false; p.doneAt = null; p.doneNote = null;
+            p.autoDone = false; p.actualPaid = false; p.doneAt = null; p.doneNote = null;
             version++;
             ApplyKeepFresh(p, cfg, st);
             Save();
@@ -272,6 +273,33 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
             if (!needed) cfg.keepFresh.Remove(p.buyUid);
             p.addedKeepFresh.Remove(p.buyUid);
             cfg.Save();
+        }
+
+        public class RouteTotal
+        {
+            public string name, from, to;
+            public int count, units;
+            public double profit;
+            public bool held;           // plans selling stock already held: "profit" is what was received
+        }
+
+        // Completed plans grouped by goods and route, best total first.
+        public static List<RouteTotal> Routes()
+        {
+            var map = new Dictionary<string, RouteTotal>();
+            foreach (var p in list)
+            {
+                if (p.state != 2) continue;
+                bool held = p.buyUid < 0;
+                string from = held ? "（已持有）" : p.buyName;
+                var k = p.name + "|" + from + "|" + p.sellName;
+                RouteTotal r;
+                if (!map.TryGetValue(k, out r)) map[k] = r = new RouteTotal { name = p.name, from = from, to = p.sellName, held = held };
+                r.count++; r.units += p.boughtQty; r.profit += p.soldRevenue - p.planCost;
+            }
+            var res = new List<RouteTotal>(map.Values);
+            res.Sort((a, b) => b.profit.CompareTo(a.profit));
+            return res;
         }
 
         static long GameMM()
@@ -359,7 +387,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
             {
                 p.doneNote = "在计划的 " + p.sellName + " 卖出";
                 // The records cover the whole sale only when they hold exactly this plan's units (the game keeps 16).
-                if (units == p.boughtQty && paid > 0) { p.soldRevenue = paid; p.doneNote += "，实际到手按游戏成交记录"; }
+                if (units == p.boughtQty && paid > 0) { p.soldRevenue = paid; p.actualPaid = true; p.doneNote += "，实际到手按游戏成交记录"; }
             }
             else
             {

@@ -524,7 +524,7 @@ namespace TradeHelper.Ui
     public class PlansView : ViewBase
     {
         readonly Table<Plan> table;
-        readonly TextMeshProUGUI detail;
+        readonly TextMeshProUGUI detail, summary;
         Plan selected;
         int show;
 
@@ -554,6 +554,7 @@ namespace TradeHelper.Ui
                 foreach (var p in new List<Plan>(Plans.list)) if (p.state == 2) Plans.Remove(p, cfg);
                 Refresh();
             });
+            summary = Kit.TxtAt(root, "", 476, 30, w.BodyW - 476, 32, 15, Theme.Text);
             var cols = new List<Column<Plan>>
             {
                 new Column<Plan> { title = "商品", width = 130, text = p => p.name, key = p => p.name },
@@ -584,12 +585,34 @@ namespace TradeHelper.Ui
             detail.overflowMode = TextOverflowModes.Truncate;
         }
 
-        void Refresh() { table.SetData(new List<Plan>(Plans.list)); ShowDetail(); }
+        void Refresh() { table.SetData(new List<Plan>(Plans.list)); ShowSummary(); ShowDetail(); }
+
+        // Totals over completed plans: trade plans (bought, then sold) and plans that sold stock already held are kept
+        // apart, since the latter have no purchase cost.
+        void ShowSummary()
+        {
+            int trades = 0, helds = 0, actual = 0; double profit = 0, received = 0;
+            foreach (var p in Plans.list)
+            {
+                if (p.state != 2) continue;
+                if (p.actualPaid) actual++;
+                if (p.buyUid < 0) { helds++; received += p.soldRevenue; }
+                else { trades++; profit += p.soldRevenue - p.planCost; }
+            }
+            if (trades + helds == 0) { summary.text = "<color=#A4A5A6>完成的计划会在这里汇总：一共赚了多少、哪条路线最赚。</color>"; return; }
+            var sb = new System.Text.StringBuilder();
+            if (trades > 0) sb.Append("已完成跑商 ").Append(trades).Append(" 笔，共净赚 <color=#").Append(ColorUtility.ToHtmlStringRGB(profit >= 0 ? Theme.Good : Theme.Bad)).Append(">").Append(Signed(profit)).Append("</color>，平均每笔 ").Append(Signed(profit / trades));
+            if (helds > 0) sb.Append(trades > 0 ? "；" : "").Append("卖库存 ").Append(helds).Append(" 笔，到手 ").Append(Fmt.Money(received));
+            var routes = Plans.Routes().FindAll(r => !r.held);
+            if (routes.Count > 0) sb.Append("；最赚：").Append(routes[0].name).Append(" ").Append(routes[0].from).Append("→").Append(routes[0].to);
+            sb.Append(actual < trades + helds ? "  <color=#A4A5A6>(" + (trades + helds - actual) + " 笔按估计)</color>" : "");
+            summary.text = sb.ToString();
+        }
 
         void ShowDetail()
         {
             var p = selected;
-            if (p == null || !Plans.list.Contains(p)) { detail.text = "<color=#A4A5A6>点一行看这个计划的细节：计划时和现在的价格、利润变化记录、现在卖到哪最好。</color>"; return; }
+            if (p == null || !Plans.list.Contains(p)) { detail.text = RoutesText(); return; }
             var sb = new System.Text.StringBuilder();
             sb.Append("<b>").Append(p.name).Append(" × ").Append(p.ShownQty).Append("</b>   ").Append(p.StateText).Append("   计划于 ").Append(p.createdAt).Append('\n');
             sb.Append("计划时：成本 ").Append(Fmt.Money(p.planCost)).Append("  到手 ").Append(Fmt.Money(p.planRevenue)).Append("  净赚 ").Append(Fmt.Money(p.PlanProfit)).Append('\n');
@@ -623,6 +646,21 @@ namespace TradeHelper.Ui
                 sb.Append(i == from ? "" : " → ").Append(p.history[i].time).Append(" ").Append(Fmt.Money(p.history[i].profit));
             if (p.history.Count == 0) sb.Append("还没有");
             detail.text = sb.ToString();
+        }
+
+        static string RoutesText()
+        {
+            var routes = Plans.Routes();
+            if (routes.Count == 0) return "<color=#A4A5A6>点一行看这个计划的细节：计划时和现在的价格、利润变化记录、现在卖到哪最好。完成的计划多了，这里会按路线汇总。</color>";
+            var sb = new System.Text.StringBuilder("<b>按路线汇总（已完成）</b>   <color=#A4A5A6>点一行看单个计划</color>\n");
+            for (int i = 0; i < Math.Min(6, routes.Count); i++)
+            {
+                var r = routes[i];
+                sb.Append(r.name).Append("  ").Append(r.from).Append(" → ").Append(r.to).Append("   ").Append(r.count).Append(" 次 ").Append(r.units).Append(" 个   ")
+                  .Append(r.held ? "到手 " + Fmt.Money(r.profit) : "共净赚 " + Signed(r.profit) + "，平均 " + Signed(r.profit / r.count)).Append('\n');
+            }
+            if (routes.Count > 6) sb.Append("<color=#A4A5A6>还有 ").Append(routes.Count - 6).Append(" 条路线</color>");
+            return sb.ToString();
         }
 
         public override void OnSnapshot(Snapshot s)
