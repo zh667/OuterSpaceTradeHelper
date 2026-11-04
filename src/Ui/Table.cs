@@ -63,14 +63,14 @@ namespace TradeHelper.Ui
             this.sortCol = sortCol; this.desc = desc;
             root = Kit.Place(Kit.New("Table", parent), x, y, w, h);
             var head = Kit.Place(Kit.New("Head", root), 0, 0, w, HeadH);
-            Kit.Img(head, Theme.White, Theme.Hex(0x000000, 0.35f));
+            Kit.Img(head, Theme.White, Theme.HeadBg);
             float cx = 8;
             for (int i = 0; i < cols.Count; i++)
             {
                 int ci = i;
                 var c = cols[i];
                 var hrt = Kit.Place(Kit.New("H", head), cx, 0, c.width, HeadH);
-                var t = Kit.Txt(hrt, c.title, 15, Theme.Text2, c.align);
+                var t = Kit.Txt(hrt, c.title, 16, Theme.Text, c.align, null, 11);
                 Kit.Stretch(t.rectTransform, 4, 0, 4, 0);
                 headers.Add(t);
                 if (c.key != null)
@@ -85,7 +85,7 @@ namespace TradeHelper.Ui
             var line = Kit.Place(Kit.New("Line", root), 0, HeadH, w, 1);
             Kit.Img(line, Theme.White, Theme.Line);
 
-            viewport = Kit.Place(Kit.New("View", root), 0, HeadH + 1, w, h - HeadH - 1);
+            viewport = Kit.Place(Kit.New("View", root), 0, HeadH + 1, w - 12, h - HeadH - 1);
             Kit.Img(viewport, Theme.White, new Color(0, 0, 0, 0), true);
             viewport.gameObject.AddComponent<RectMask2D>();
             content = Kit.New("Content", viewport);
@@ -95,6 +95,18 @@ namespace TradeHelper.Ui
             scroll.horizontal = false; scroll.viewport = viewport; scroll.content = content;
             scroll.movementType = ScrollRect.MovementType.Clamped; scroll.scrollSensitivity = 45; scroll.inertia = false;
             scroll.onValueChanged.AddListener(_ => Bind());
+            // Scrollbar like the game's: track #535657, handle #75777A.
+            var track = Kit.Place(Kit.New("Scrollbar", root), w - 8, HeadH + 3, 6, h - HeadH - 5);
+            var trackImg = Kit.Img(track, Theme.Box, Theme.Line, true);
+            var area = Kit.Stretch(Kit.New("Sliding Area", track));
+            var handle = Kit.Stretch(Kit.New("Handle", area));
+            var handleImg = Kit.Img(handle, Theme.Box, Color.white, true);
+            var sb = track.gameObject.AddComponent<Scrollbar>();
+            sb.handleRect = handle; sb.targetGraphic = handleImg; sb.direction = Scrollbar.Direction.BottomToTop;
+            var cb = ColorBlock.defaultColorBlock; cb.normalColor = Theme.Line2; cb.highlightedColor = Theme.Text2; cb.pressedColor = Theme.Line; cb.selectedColor = Theme.Line2; sb.colors = cb;
+            trackImg.raycastTarget = true;
+            scroll.verticalScrollbar = sb;
+            scroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.AutoHide;
             int visible = Mathf.CeilToInt((h - HeadH) / RowH) + 2;
             for (int r = 0; r < visible; r++) rows.Add(MakeRow(w));
             empty = Kit.TxtAt(viewport, emptyText, 0, 20, w, 30, 16, Theme.Text2, TextAlignmentOptions.Center);
@@ -131,6 +143,8 @@ namespace TradeHelper.Ui
                 else
                 {
                     var t = Kit.Txt(r.rt, "", 15, Theme.Text, c.align, c.numeric ? Theme.NumFont : Theme.Font);
+                    // KodeMono may lack the ellipsis glyph; cut numbers cleanly instead of letting them spill over.
+                    if (c.numeric) t.overflowMode = TextOverflowModes.Truncate;
                     Kit.Place(t.rectTransform, cx + 4, 0, c.width - 8, RowH);
                     r.cells[i] = t;
                 }
@@ -210,7 +224,7 @@ namespace TradeHelper.Ui
             {
                 var c = columns[i];
                 headers[i].text = c.title + (i == sortCol && c.key != null ? (desc ? " ▼" : " ▲") : "");
-                headers[i].color = i == sortCol ? Theme.Accent : Theme.Text2;
+                headers[i].color = i == sortCol ? Theme.Accent : Theme.Text;
             }
         }
 

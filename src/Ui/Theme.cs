@@ -10,7 +10,7 @@ namespace TradeHelper.Ui
     public static class Theme
     {
         public static TMP_FontAsset Font, NumFont;
-        public static Sprite Window, Frame, ButtonGray, ButtonYellow, Tag, White, Box, Close, Filter, Arrow, Input;
+        public static Sprite Window, Frame, ButtonGray, ButtonYellow, Tag, White, Box, Close, Filter, Arrow, Input, Pill, InputPill, Halo;
         public static bool GameSprites;
 
         public static readonly Color Bg = Hex(0x282723, 0.97f);
@@ -19,6 +19,9 @@ namespace TradeHelper.Ui
         public static readonly Color RowAlt = Hex(0xFFFFFF, 0.0f);
         public static readonly Color RowSel = Hex(0xF4B30D, 0.18f);
         public static readonly Color Line = Hex(0x535657, 1f);
+        public static readonly Color HeadBg = Hex(0x323435, 0.9f);
+        public static readonly Color BtnLight = Hex(0xC6C9CA, 1f);
+        public static readonly Color DropBg = Hex(0x282723, 1f);
         public static readonly Color Line2 = Hex(0x75777A, 1f);
         public static readonly Color Text = Hex(0xE6EAEC, 1f);
         public static readonly Color Text2 = Hex(0xA4A5A6, 1f);
@@ -80,6 +83,9 @@ namespace TradeHelper.Ui
             Filter = Load("UI_icon", "common_icon_filter.png");
             Arrow = Load("UI_elm", "common_elm_arrow_2cr.png");
             Input = Load("UI_icon", "icon_input.png");
+            Pill = Load("UI_flame", "common_flame_mood_46.png");
+            InputPill = Load("UI_flame", "common_flame_jiaonangbg_28h_100.png");
+            Halo = Load("UI_elm", "elm_halo.png");
             GameSprites = Window != null && ButtonGray != null;
             if (Window == null) Window = plain;
             if (Frame == null) Frame = plain;
@@ -87,7 +93,9 @@ namespace TradeHelper.Ui
             if (ButtonGray == null) ButtonGray = plain;
             if (ButtonYellow == null) ButtonYellow = plain;
             if (Tag == null) Tag = plain;
-            Debug.Log("[TradeHelper] theme font=" + (Font != null ? Font.name : "null") + " num=" + (NumFont != null ? NumFont.name : "null") + " gameSprites=" + GameSprites);
+            if (Pill == null) Pill = Box;
+            if (InputPill == null) InputPill = Frame;
+            Debug.Log("[TradeHelper] theme font=" + (Font != null ? Font.name : "null") + " num=" + (NumFont != null ? NumFont.name : "null") + " gameSprites=" + GameSprites + " pill=" + (Pill != plain) + " inputPill=" + (InputPill != Frame) + " halo=" + (Halo != null));
         }
     }
 }

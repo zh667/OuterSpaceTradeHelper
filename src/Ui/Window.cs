@@ -38,7 +38,7 @@ namespace TradeHelper.Ui
         public GameObject canvasGo;
         RectTransform win, body, popupLayer;
         TextMeshProUGUI status, title;
-        readonly List<Kit.Btn> tabButtons = new List<Kit.Btn>();
+        readonly List<Kit.Tab> tabButtons = new List<Kit.Tab>();
         readonly Dictionary<int, IView> views = new Dictionary<int, IView>();
         int tab;
         public Snapshot snap;
@@ -90,6 +90,7 @@ namespace TradeHelper.Ui
             Kit.Img(accent, Theme.White, Theme.Accent);
             title = Kit.TxtAt(win, "跑商助手  <size=15><color=#A4A5A6>" + TradeHelperBehaviour.Version + "  ·  " + cfg.hotkey + " 开关  ·  拖动标题栏移动</color></size>", Pad + 16, 10, 900, 34, 24, Theme.Text);
             Kit.Button(win, "刷新", W - Pad - 46 - 12 - 110, 12, 110, 32, () => host.RequestRefresh(true), true);
+            Kit.Button(win, "截图反馈", W - Pad - 46 - 12 - 110 - 8 - 110, 12, 110, 32, () => host.Screenshot());
             var close = Kit.Place(Kit.New("Close", win), W - Pad - 40, 10, 38, 38);
             var cimg = Kit.Img(close, Theme.Close ?? Theme.White, Theme.Close != null ? Color.white : Theme.Bad, true);
             var cb = close.gameObject.AddComponent<Button>();
@@ -99,7 +100,7 @@ namespace TradeHelper.Ui
             for (int i = 0; i < TabNames.Length; i++)
             {
                 int ti = i;
-                tabButtons.Add(Kit.Button(win, TabNames[i], Pad + i * 132, 56, 126, 34, () => SelectTab(ti), false, 17));
+                tabButtons.Add(Kit.TabButton(win, TabNames[i], Pad + i * 132, 58, 126, 36, () => SelectTab(ti)));
             }
             status = Kit.TxtAt(win, "", Pad + TabNames.Length * 132 + 12, 56, W - Pad * 2 - TabNames.Length * 132 - 12, 34, 15, Theme.Text2, TextAlignmentOptions.MidlineRight);
             var sep = Kit.Place(Kit.New("Sep", win), Pad, 98, W - Pad * 2, 1);
@@ -117,7 +118,7 @@ namespace TradeHelper.Ui
         {
             Kit.Drop.CloseAll?.Invoke();
             tab = t;
-            for (int i = 0; i < tabButtons.Count; i++) tabButtons[i].Primary = i == t;
+            for (int i = 0; i < tabButtons.Count; i++) tabButtons[i].Selected = i == t;
             if (!views.ContainsKey(t))
             {
                 IView v = null;
