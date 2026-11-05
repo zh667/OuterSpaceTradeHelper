@@ -49,7 +49,7 @@ namespace TradeHelper.Ui
         readonly Dictionary<int, IView> views = new Dictionary<int, IView>();
         int tab;
         public Snapshot snap;
-        static readonly string[] TabNames = { "跑商建议", "跑商计划", "卖库存", "各站市场", "我的库存", "后台补算", "设置" };
+        static readonly string[] TabNames = { "跑商建议", "跑商计划", "卖库存", "各站市场", "我的库存", "后台补算", "结账记录", "设置" };
         public const float W = 1560, H = 860, BodyY = 112, Pad = 18;
         public float BodyW => W - Pad * 2;
         public float BodyH => H - BodyY - Pad;
@@ -138,7 +138,8 @@ namespace TradeHelper.Ui
                     case 3: v = new MarketsView(this, body, cfg, host); break;
                     case 4: v = new InventoryView(this, body, cfg, host); break;
                     case 5: v = new SettlementView(this, body, cfg, host); break;
-                    case 6: v = new SettingsView(this, body, cfg, host); break;
+                    case 6: v = new LedgerView(this, body, cfg, host); break;
+                    case 7: v = new SettingsView(this, body, cfg, host); break;
                 }
                 views[t] = v;
                 if (snap != null) v.OnSnapshot(snap);

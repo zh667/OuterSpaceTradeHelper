@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using Newtonsoft.Json;
 using UnityEngine;
 
@@ -146,6 +147,7 @@ namespace TradeHelper
             Run(() => StationPlaces());
 
             if (req.tests == "all" || req.tests.Contains("trade")) yield return Guard(TradeTest(), "real trade: buy, plan stages, sell");
+            if (req.tests == "all" || req.tests.Contains("ledger")) yield return Guard(LedgerTest(), "checkout ledger: the game's own checkout");
             yield return Guard(CatchUpSmoothness(false), "catch-up smoothness");
 
             // A full scan from scratch, then a refresh with nothing changed.
@@ -559,6 +561,155 @@ namespace TradeHelper
             c.details.Add("route summary: " + (route == null ? "missing" : route.count + " time(s), " + route.units + " units, profit " + route.profit.ToString("0") + " (expected " + (payS - idea.cost).ToString("0") + ")") + (routeOk ? " ok" : " WRONG"));
             c.passed = buyOk && stage2 && bestOk && decoyFlag && unbought && sellOk && stage3 && decoyKept && creditsOk && routeOk;
             c.summary = (c.passed ? "all steps match" : "some steps differ") + " (" + qb.name + " " + qb.market.name + " -> " + qs.market.name + ")";
+        }
+
+        // Opens the game's trade page for a market the way PageInGalaxySpace.openExchangePage does.
+        static PageTradeInventory OpenTradePage(FWExchangeSpace ex, out ExchangeTransferHandler h, out ExchangeInventoryContext xc, out FleetInventoryContext fc)
+        {
+            fc = new FleetInventoryContext(AirShipLocalData.Instance.getCurFleet(), false);
+            xc = new ExchangeInventoryContext(ex, "贸易市场");
+            h = new ExchangeTransferHandler(xc, fc);
+            var page = UIHelp.showPageTradeInventory();
+            page.InitData(xc, fc, h, null);
+            return page;
+        }
+
+        static int PutInCart(ExchangeTransferHandler h, List<StorageItemInstance> from, Predicate<StorageItemInstance> match, int n, bool buy)
+        {
+            int added = 0;
+            foreach (var it in from)
+            {
+                if (added >= n || !match(it)) continue;
+                int before = (buy ? h.BuyCart : h.SellCart).ConvertAll(x => x.Quantity).Sum();
+                h.HandleItemTransfer(it, buy ? PanelRole.ShopSystem : h.CurrentPlayerRole, buy ? h.CurrentPlayerRole : PanelRole.ShopSystem, n - added);
+                added += (buy ? h.BuyCart : h.SellCart).ConvertAll(x => x.Quantity).Sum() - before;
+            }
+            return added;
+        }
+
+        static readonly System.Reflection.MethodInfo DoCheckout = typeof(PageTradeInventory).GetMethod("DoCheckout", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+
+        // Buys special goods (fleet wings) and a normal goods at one market and sells them at another through the game's
+        // own trade page and checkout (PageTradeInventory.DoCheckout), with a plan for the special goods. The ledger must
+        // match the credits exactly per checkout, the plan must take its cost and revenue from the ledger, and a credit
+        // change slipped into the checkout frame must be reported as not matching.
+        IEnumerator LedgerTest()
+        {
+            var c = new Check { name = "checkout ledger: the game's own checkout" };
+            result.checks.Add(c);
+            yield return Refresh();
+            var snap = host.Latest;
+            var gd = MarketScanner.Game;
+            const int k = 3, kn = 2;
+            GoodsQuote qb = null, qs = null, nb = null, ns = null;
+            Locked(() =>
+            {
+                foreach (var m in snap.markets)
+                {
+                    if (qb != null) break;
+                    if (!m.Exact || m.planet || !m.Explored) continue;
+                    foreach (var q in m.goods)
+                    {
+                        if (!q.special || q.specialGoods == null || q.specialGoods.UsesEquipmentPressure || !q.buyable || q.contraband || q.stock < k) continue;
+                        if (q.specialGoods.goodsList == null || !q.specialGoods.goodsList.TrueForAll(g => g != null && g.goods is FWThingBean)) continue;
+                        foreach (var m2 in snap.markets)
+                        {
+                            GoodsQuote q2, n2 = null;
+                            if (m2 == m || !m2.Exact || m2.planet || !m2.Explored || !m2.byGid.TryGetValue(q.gid, out q2) || q2.contraband || q2.specialGoods == null) continue;
+                            var n1 = m.goods.Find(x => !x.special && x.normal != null && x.buyable && !x.contraband && x.stock >= kn && m2.byGid.TryGetValue(x.gid, out n2) && !n2.contraband);
+                            if (n1 == null) continue;
+                            qb = q; qs = q2; nb = n1; ns = m2.byGid[n1.gid]; break;
+                        }
+                        if (qb != null) break;
+                    }
+                }
+            });
+            if (qb == null) { c.passed = false; c.summary = "no special goods with two up-to-date markets that share a normal goods"; yield break; }
+            if (DoCheckout == null) { c.passed = false; c.summary = "PageTradeInventory.DoCheckout not found"; yield break; }
+            var idea = new TradeIdea { gid = qb.gid, name = qb.name, category = qb.category, buy = qb, sell = qs, qty = k, cost = qb.BuyCost(k), revenue = qs.SellBoughtRevenue(0, qb, 0, k) };
+            Plan plan = null;
+            Locked(() => plan = Plans.FromTrade(idea, snap, host.Cfg, host.settlement));
+            yield return Refresh();
+            bool ok = true;
+
+            // 1) Buy k special + kn normal at A in one checkout.
+            int n0 = Ledger.entries.Count; long cp0 = gd.creditPoint;
+            PageTradeInventory page = null; ExchangeTransferHandler h = null; ExchangeInventoryContext xc; FleetInventoryContext fc;
+            int addS = 0, addN = 0;
+            Locked(() =>
+            {
+                page = OpenTradePage(qb.market.ex, out h, out xc, out fc);
+                var shop = xc.GetItems();
+                addS = PutInCart(h, shop, it => it.SourceGoods == qb.specialGoods, k, true);
+                addN = PutInCart(h, shop, it => it.SourceGoods == nb.normal, kn, true);
+            });
+            yield return new WaitForSecondsRealtime(1.5f);   // the ledger finds the page and prices the cart
+            Locked(() => DoCheckout.Invoke(page, null));
+            yield return null; yield return null;
+            var e1 = Ledger.entries.Count > n0 ? Ledger.entries[Ledger.entries.Count - 1] : null;
+            long d1 = gd.creditPoint - cp0;
+            bool buyOk = addS == k && addN == kn && e1 != null && e1.exact && e1.creditDelta == d1 && d1 < 0 && e1.market == qb.market.name
+                         && Math.Abs(e1.items.ConvertAll(x => x.net).Sum() - d1) < 1.5
+                         && e1.items.FindAll(x => x.buy && x.key == plan.key).Sum(x => x.qty) == k && e1.items.FindAll(x => x.buy && x.key != plan.key).Sum(x => x.qty) == kn;
+            c.details.Add("buy at " + qb.market.name + ": cart " + addS + "+" + addN + ", credits " + d1 + ", ledger " + (e1 == null ? "none" : e1.creditDelta + " exact=" + e1.exact + " lines " + string.Join("; ", e1.items.ConvertAll(x => x.name + " x" + x.qty + " " + x.net.ToString("0.0")))) + (buyOk ? " ok" : " WRONG"));
+            ok &= buyOk;
+            Locked(() => page.RequestClose());
+            yield return Refresh();
+            double specialCost = e1 != null ? -e1.items.FindAll(x => x.key == plan.key).Sum(x => x.net) : double.NaN;
+            bool costOk = plan.state == 1 && plan.CostKnown && Math.Abs(plan.paidCost - specialCost) < 0.01;
+            c.details.Add("plan after buying: " + plan.StateText + ", cost from ledger " + plan.paidCost.ToString("0.0") + " (planned " + plan.planCost.ToString("0") + ")" + (costOk ? " ok" : " WRONG"));
+            ok &= costOk;
+
+            // 2) Sell them at B in one checkout.
+            n0 = Ledger.entries.Count; cp0 = gd.creditPoint;
+            Locked(() =>
+            {
+                page = OpenTradePage(qs.market.ex, out h, out xc, out fc);
+                var hold = fc.GetItems();
+                addS = PutInCart(h, hold, it => it.RawData is FWThingBean t && t.type + "_" + t.id == plan.key, k, false);
+                var nkey = nb.normal.getItemType() + "_" + nb.normal.getItemId();
+                addN = PutInCart(h, hold, it => it.RawData is FWThingBean t && t.type + "_" + t.id == nkey, kn, false);
+            });
+            yield return new WaitForSecondsRealtime(1.5f);
+            Locked(() => DoCheckout.Invoke(page, null));
+            yield return null; yield return null;
+            var e2 = Ledger.entries.Count > n0 ? Ledger.entries[Ledger.entries.Count - 1] : null;
+            long d2 = gd.creditPoint - cp0;
+            bool sellOk = addS == k && addN == kn && e2 != null && e2.exact && e2.creditDelta == d2 && d2 > 0 && e2.market == qs.market.name
+                          && Math.Abs(e2.items.ConvertAll(x => x.net).Sum() - d2) < 1.5 && e2.items.FindAll(x => !x.buy && x.key == plan.key).Sum(x => x.qty) == k;
+            c.details.Add("sell at " + qs.market.name + ": cart " + addS + "+" + addN + ", credits " + d2 + ", ledger " + (e2 == null ? "none" : e2.creditDelta + " exact=" + e2.exact + " lines " + string.Join("; ", e2.items.ConvertAll(x => x.name + " x" + x.qty + " " + x.net.ToString("0.0")))) + (sellOk ? " ok" : " WRONG"));
+            ok &= sellOk;
+            Locked(() => page.RequestClose());
+            yield return Refresh();
+            // Items of different durability are separate cart lines.
+            double specialGot = e2 != null ? e2.items.FindAll(x => x.key == plan.key && !x.buy).Sum(x => x.net) : double.NaN;
+            bool doneOk = plan.state == 2 && plan.actualPaid && Math.Abs(plan.soldRevenue - specialGot) < 0.01 && plan.doneNote != null && plan.doneNote.Contains(qs.market.name) && plan.doneNote.Contains("结账记录");
+            c.details.Add("plan after selling: " + plan.StateText + ", revenue " + plan.soldRevenue.ToString("0.0") + ", profit " + plan.CurProfit.ToString("0.0") + " / " + plan.doneNote + (doneOk ? " ok" : " WRONG"));
+            ok &= doneOk;
+
+            // 3) A credit change in the checkout frame (something else paying out at the same moment) must not pass as exact.
+            n0 = Ledger.entries.Count; cp0 = gd.creditPoint;
+            Locked(() =>
+            {
+                page = OpenTradePage(qs.market.ex, out h, out xc, out fc);
+                addN = PutInCart(h, xc.GetItems(), it => it.SourceGoods == ns.normal, 1, true);
+            });
+            yield return new WaitForSecondsRealtime(1.5f);
+            Locked(() => { gd.addCP(7, "TradeHelper selftest"); DoCheckout.Invoke(page, null); });
+            yield return null; yield return null;
+            var e3 = Ledger.entries.Count > n0 ? Ledger.entries[Ledger.entries.Count - 1] : null;
+            bool flagOk = e3 != null && !e3.exact && e3.creditDelta - e3.billDelta == 7 && e3.note != null && e3.note.Contains("差 7");
+            c.details.Add("credit change slipped into the checkout: " + (e3 == null ? "no entry" : "exact=" + e3.exact + " / " + e3.note) + (flagOk ? " ok" : " WRONG"));
+            ok &= flagOk;
+            Locked(() => page.RequestClose());
+
+            host.SetVisible(true);
+            host.ShowTab(6);
+            yield return new WaitForSecondsRealtime(1.5f);
+            yield return Shot("ledger");
+            host.SetVisible(false);
+            c.passed = ok;
+            c.summary = (ok ? "all checkouts match" : "some steps differ") + " (" + qb.name + " " + qb.market.name + " -> " + qs.market.name + ", with " + nb.name + ")";
         }
 
         // A galaxy event window (e.g. regional inflation x1.15) may open or close between the scan and the check.

@@ -614,7 +614,7 @@ namespace TradeHelper.Ui
                 if (p.state != 2) continue;
                 if (p.actualPaid) actual++;
                 if (p.buyUid < 0) { helds++; received += p.soldRevenue; }
-                else { trades++; profit += p.soldRevenue - p.planCost; }
+                else { trades++; profit += p.soldRevenue - p.Cost; }
             }
             if (trades + helds == 0) { summary.text = "<color=#A4A5A6>完成的计划会在这里汇总：一共赚了多少、哪条路线最赚。</color>"; return; }
             var sb = new System.Text.StringBuilder();
@@ -632,7 +632,9 @@ namespace TradeHelper.Ui
             if (p == null || !Plans.list.Contains(p)) { detail.text = RoutesText(); return; }
             var sb = new System.Text.StringBuilder();
             sb.Append("<b>").Append(p.name).Append(" × ").Append(p.ShownQty).Append("</b>   ").Append(p.StateText).Append("   计划于 ").Append(p.createdAt).Append('\n');
-            sb.Append("计划时：成本 ").Append(Fmt.Money(p.planCost)).Append("  到手 ").Append(Fmt.Money(p.planRevenue)).Append("  净赚 ").Append(Fmt.Money(p.PlanProfit)).Append('\n');
+            sb.Append("计划时：成本 ").Append(Fmt.Money(p.planCost)).Append("  到手 ").Append(Fmt.Money(p.planRevenue)).Append("  净赚 ").Append(Fmt.Money(p.PlanProfit));
+            if (p.CostKnown) sb.Append("    实际买入花了 ").Append(Fmt.Money(p.paidCost)).Append("（结账记录）");
+            sb.Append('\n');
             sb.Append("现在：").Append(p.state == 0 ? "成本 " + (double.IsNaN(p.curCost) ? "?" : Fmt.Money(p.curCost)) + "  " : "成本按计划 ").Append("到手 ")
               .Append(double.IsNaN(p.curRevenue) ? "?" : Fmt.Money(p.curRevenue)).Append("  净赚 ").Append(double.IsNaN(p.CurProfit) ? "?" : Fmt.Money(p.CurProfit))
               .Append("（").Append(Change(p)).Append("）");
@@ -647,7 +649,7 @@ namespace TradeHelper.Ui
                 sb.Append("库存里已少了 ").Append(p.soldQty).Append("/").Append(p.boughtQty).Append(" 个（按卖出算，约到手 ").Append(Fmt.Money(p.soldRevenue)).Append("），全部没了会自动完成\n");
             if (p.state == 2)
                 sb.Append("<color=#A4A5A6>").Append(p.autoDone ? "自动完成" : "完成").Append("于 ").Append(p.doneAt ?? "?").Append("：").Append(p.doneNote ?? "")
-                  .Append("。到手约 ").Append(Fmt.Money(p.soldRevenue)).Append("，净赚约 ").Append(Fmt.Money(p.soldRevenue - p.planCost)).Append(p.autoDone ? "。判断错了可点「改回已买入」" : "").Append("</color>\n");
+                  .Append(p.actualPaid ? "。到手 " : "。到手约 ").Append(Fmt.Money(p.soldRevenue)).Append(p.actualPaid && (p.CostKnown || p.buyUid < 0) ? "，净赚 " : "，净赚约 ").Append(Fmt.Money(p.soldRevenue - p.Cost)).Append(p.autoDone ? "。判断错了可点「改回已买入」" : "").Append("</color>\n");
             if (p.sellAhead > 0 || p.buyAhead > 0)
                 sb.Append("<color=#D8982F>同站同货有别的计划排在前面：").Append(p.sellAhead > 0 ? "卖出站先有 " + p.sellAhead + " 个要卖，" : "").Append(p.buyAhead > 0 ? "买入站先有 " + p.buyAhead + " 个要买，" : "")
                   .Append("这里的价格已按被它们压过之后算（顺序：已买/持有的先，再按加入先后）</color>\n");
@@ -689,6 +691,64 @@ namespace TradeHelper.Ui
         {
             base.OnSnapshot(s);
             Refresh();
+        }
+    }
+}
+
+namespace TradeHelper.Ui
+{
+    // The mod's record of the player's checkouts (Ledger): one row per cart line, newest first.
+    public class LedgerView : ViewBase
+    {
+        class Row { public LedgerEntry e; public LedgerItem it; public long order; }
+        readonly Table<Row> table;
+        readonly TextMeshProUGUI summary;
+        int seen = -1;
+
+        static string Signed(double v) => (v >= 0 ? "+" : "") + Fmt.Money(v);
+
+        public LedgerView(Window w, RectTransform body, Config cfg, TradeHelperBehaviour host) : base(w, body, cfg, host)
+        {
+            Kit.TxtAt(root, "在贸易市场结账时，模组按游戏界面的结账单给购物车里每件货算价，再和信用点的实际变化核对：一致就是“精确”，每种货在哪卖、到手多少都准（舰载机这类游戏不留成交记录的货也一样）。只记装了 0.4.8 以后的结账。", 0, 0, w.BodyW, 24, 14, Theme.Text2);
+            summary = Kit.TxtAt(root, "", 0, 30, w.BodyW, 30, 15, Theme.Text);
+            var cols = new List<Column<Row>>
+            {
+                new Column<Row> { title = "时间", width = 150, text = r => r.e.time, key = r => r.order, numeric = true },
+                new Column<Row> { title = "星系·空间站", width = 220, text = r => r.e.market ?? "?", key = r => r.e.market },
+                new Column<Row> { title = "买/卖", width = 60, text = r => r.it == null ? "" : r.it.buy ? "买" : "卖", key = r => r.it == null ? null : (IComparable)r.it.buy, color = r => r.it != null && !r.it.buy ? Theme.Good : Theme.Text },
+                new Column<Row> { title = "商品", width = 160, text = r => r.it?.name ?? "（只有信用点变化）", key = r => r.it?.name },
+                new Column<Row> { title = "数量", width = 64, text = r => r.it == null ? "" : r.it.qty.ToString(), key = r => r.it?.qty, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<Row> { title = "单价（含税）", width = 120, text = r => r.it == null || r.it.qty == 0 ? "" : Fmt.Money(Math.Abs(r.it.net) / r.it.qty), key = r => r.it == null || r.it.qty == 0 ? (IComparable)null : Math.Abs(r.it.net) / r.it.qty, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<Row> { title = "金额", width = 120, text = r => r.it == null ? "" : Signed(r.it.net), key = r => r.it?.net, numeric = true, align = TextAlignmentOptions.MidlineRight, color = r => r.it == null ? Theme.Text : r.it.net >= 0 ? Theme.Good : Theme.Warn },
+                new Column<Row> { title = "这次结账信用点", width = 140, text = r => Signed(r.e.creditDelta), key = r => r.e.creditDelta, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<Row> { title = "核对", width = 70, text = r => r.e.exact ? "精确" : "估", key = r => r.e.exact, color = r => r.e.exact ? Theme.Good : Theme.Warn },
+                new Column<Row> { title = "说明", width = 400, text = r => r.e.note ?? (r.e.tax > 0 ? "市场税 " + (r.e.tax * 100).ToString("0") + "%" : ""), key = null, color = r => Theme.Text2 },
+            };
+            table = new Table<Row>(root, 0, 66, w.BodyW, w.BodyH - 66, cols, 0, true);
+            table.emptyText = "还没有结账记录。在贸易市场买卖一次就会出现在这里。";
+        }
+
+        public override void Tick()
+        {
+            if (seen == Ledger.version) return;
+            seen = Ledger.version;
+            var rows = new List<Row>();
+            int exact = 0; double got = 0, paid = 0;
+            for (int i = 0; i < Ledger.entries.Count; i++)
+            {
+                var e = Ledger.entries[i];
+                if (e.exact) exact++;
+                if (e.items == null || e.items.Count == 0) { rows.Add(new Row { e = e, order = i * 1000L }); continue; }
+                for (int j = 0; j < e.items.Count; j++)
+                {
+                    var it = e.items[j];
+                    rows.Add(new Row { e = e, it = it, order = i * 1000L + j });
+                    if (it.net >= 0) got += it.net; else paid -= it.net;
+                }
+            }
+            table.SetData(rows);
+            summary.text = Ledger.entries.Count == 0 ? "" : "共 " + Ledger.entries.Count + " 次结账（" + exact + " 次和信用点对得上）  卖出到手 " + Fmt.Money(got) + "  买入花费 " + Fmt.Money(paid)
+                + (string.IsNullOrEmpty(Ledger.lastError) ? "" : "   <color=#D8982F>" + Ledger.lastError + "</color>");
         }
     }
 }

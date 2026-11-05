@@ -40,7 +40,12 @@ namespace TradeHelper
         public int soldQty;                     // units of this plan that have left the inventory since
         public double soldRevenue;              // estimate for those units at the time they left (actual when known)
         public bool autoDone;                   // completed automatically
-        public bool actualPaid;                 // soldRevenue is what the game's trade records say was paid
+        public bool actualPaid;                 // soldRevenue is what was actually paid (trade records or the mod's checkout ledger)
+        // From the mod's checkout ledger (Ledger): units whose purchase / sale price is known to the credit, and where
+        // the units went.
+        public double paidCost;
+        public int exactBought, exactSold;
+        public string soldAtLedger;
         public string doneAt, doneNote;
 
         // Live values (not saved).
@@ -58,13 +63,16 @@ namespace TradeHelper
         [JsonIgnore] [NonSerialized] public DateTime lastPointAt = DateTime.MinValue;
 
         [JsonIgnore] public double PlanProfit => planRevenue - planCost;
+        // What the goods in hand cost: the checkout ledger's amount when it covers every unit bought, else the plan's.
+        [JsonIgnore] public bool CostKnown => buyUid >= 0 && boughtQty > 0 && exactBought >= boughtQty;
+        [JsonIgnore] public double Cost => CostKnown ? paidCost : planCost;
         [JsonIgnore] public double CurProfit => state == 0 ? curRevenue - curCost
-                                               : state == 1 ? (HoldQty > 0 ? curRevenue : 0) + soldRevenue - planCost
-                                               : soldRevenue - planCost;
+                                               : state == 1 ? (HoldQty > 0 ? curRevenue : 0) + soldRevenue - Cost
+                                               : soldRevenue - Cost;
         // Net profit if the goods still to sell went to a market paying `revenue` for them (stage 1: at today's buying
         // cost; stage 2: what was paid, plus what the units already gone brought in).
         public double ProfitIfSoldFor(double revenue) => state == 0 ? revenue - curCost
-                                                       : state == 1 ? revenue + soldRevenue - planCost
+                                                       : state == 1 ? revenue + soldRevenue - Cost
                                                        : double.NaN;
         // Net profit if everything still to sell went to the best market right now (NaN when there is none).
         [JsonIgnore] public double BestProfit => alternatives.Count > 0 ? ProfitIfSoldFor(alternatives[0].Value) : double.NaN;
@@ -256,6 +264,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
             p.state = 0;
             p.boughtQty = 0; p.soldQty = 0; p.soldRevenue = 0;
             p.autoBought = false; p.boughtAt = null; p.boughtMM = -1;
+            p.paidCost = 0; p.exactBought = 0; p.exactSold = 0; p.soldAtLedger = null;
             p.missing = 0;
             version++;
             ApplyKeepFresh(p, cfg, st);
@@ -265,7 +274,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
         public static void Reopen(Plan p, Config cfg, Settlement st)
         {
             p.state = 1;
-            p.soldQty = 0; p.soldRevenue = 0;
+            p.soldQty = 0; p.soldRevenue = 0; p.exactSold = 0; p.soldAtLedger = null;
             p.autoDone = false; p.actualPaid = false; p.doneAt = null; p.doneNote = null;
             version++;
             ApplyKeepFresh(p, cfg, st);
@@ -319,7 +328,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                 var k = p.name + "|" + from + "|" + p.sellName;
                 RouteTotal r;
                 if (!map.TryGetValue(k, out r)) map[k] = r = new RouteTotal { name = p.name, from = from, to = p.sellName, held = held };
-                r.count++; r.units += p.boughtQty; r.profit += p.soldRevenue - p.planCost;
+                r.count++; r.units += p.boughtQty; r.profit += p.soldRevenue - p.Cost;
             }
             var res = new List<RouteTotal>(map.Values);
             res.Sort((a, b) => b.profit.CompareTo(a.profit));
@@ -348,8 +357,13 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
             {
                 baselineGame = game;
                 foreach (var key in keys) lastOwned[key] = snap.Owned(key);
+                Ledger.pending.Clear();
                 return true;
             }
+            // Checkouts since the last look (the mod's ledger): which units were bought or sold, where, for how much.
+            var bought = Lots(true);
+            var sold = Lots(false);
+            Ledger.pending.Clear();
             foreach (var key in keys)
             {
                 int now = snap.Owned(key), prev;
@@ -368,12 +382,15 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                             int take = Math.Min(d, p.qty);
                             p.state = 1; p.boughtQty = take; p.autoBought = true;
                             p.boughtAt = DateTime.Now.ToString("MM-dd HH:mm"); p.boughtMM = GameMM();
+                            p.paidCost = 0; p.exactBought = 0;
+                            TakeLots(bought, key, p.buyUid, take, p, true);
                             ReleaseBuySide(p, cfg);
                             d -= take; version++;
                         }
                         else if (p.state == 1 && p.autoBought && p.soldQty == 0 && p.boughtQty < p.qty)
                         {
                             int take = Math.Min(d, p.qty - p.boughtQty);
+                            TakeLots(bought, key, p.buyUid, take, p, true);
                             p.boughtQty += take; d -= take; version++;
                         }
                     }
@@ -387,7 +404,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                     // bought by hand without buying), then in queue order.
                     var byPlace = new List<Plan>(order);
                     var soldHere = new Dictionary<Plan, bool>();
-                    foreach (var p in byPlace) if (p.key == key && p.state == 1) soldHere[p] = SoldAtSinceLastLook(snap, p);
+                    foreach (var p in byPlace) if (p.key == key && p.state == 1) soldHere[p] = SoldAtSinceLastLook(snap, p) || HasLot(sold, key, p.sellUid);
                     byPlace.Sort((a, b) =>
                     {
                         bool sa, sb;
@@ -403,8 +420,10 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                         int left = p.boughtQty - p.soldQty;
                         if (left <= 0) continue;
                         int take = Math.Min(n, left);
-                        // Value the units at the last estimate for what this plan still held.
-                        if (!double.IsNaN(p.curRevenue) && left > 0) p.soldRevenue += p.curRevenue * take / left;
+                        // Units the ledger saw sold count at what they brought; any others at the last estimate for what
+                        // this plan still held.
+                        int known = TakeLots(sold, key, p.sellUid, take, p, false);
+                        if (take > known && !double.IsNaN(p.curRevenue) && left > 0) p.soldRevenue += p.curRevenue * (take - known) / left;
                         p.soldQty += take; n -= take; version++;
                         if (p.soldQty >= p.boughtQty) Complete(p, snap, cfg);
                     }
@@ -412,6 +431,48 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
             }
             foreach (var k in new List<string>(lastOwned.Keys)) if (!keys.Contains(k)) { lastOwned.Remove(k); changed = true; }
             return changed;
+        }
+
+        class Lot { public long uid; public string market; public int qty; public double perUnit; public bool exact; }
+
+        static Dictionary<string, List<Lot>> Lots(bool buy)
+        {
+            var res = new Dictionary<string, List<Lot>>();
+            foreach (var e in Ledger.pending)
+                foreach (var it in e.items)
+                {
+                    if (it.buy != buy || it.qty <= 0 || it.key == null) continue;
+                    List<Lot> l;
+                    if (!res.TryGetValue(it.key, out l)) res[it.key] = l = new List<Lot>();
+                    l.Add(new Lot { uid = e.marketUid, market = e.market, qty = it.qty, perUnit = Math.Abs(it.net) / it.qty, exact = e.exact });
+                }
+            return res;
+        }
+
+        static bool HasLot(Dictionary<string, List<Lot>> lots, string key, long uid)
+        {
+            List<Lot> l;
+            return lots.TryGetValue(key, out l) && l.Exists(x => x.uid == uid && x.qty > 0);
+        }
+
+        // Hands up to n units of the ledger's lots for this goods to a plan (lots at the given market first). Purchases
+        // add to paidCost; sales add to soldRevenue and say where the units went. Returns the units covered.
+        static int TakeLots(Dictionary<string, List<Lot>> lots, string key, long preferUid, int n, Plan p, bool buy)
+        {
+            List<Lot> l;
+            if (n <= 0 || !lots.TryGetValue(key, out l)) return 0;
+            int covered = 0;
+            foreach (bool preferred in new[] { true, false })
+                foreach (var lot in l)
+                {
+                    if (covered >= n) break;
+                    if (lot.qty <= 0 || (lot.uid == preferUid) != preferred) continue;
+                    int k = Math.Min(lot.qty, n - covered);
+                    lot.qty -= k; covered += k;
+                    if (buy) { p.paidCost += lot.perUnit * k; if (lot.exact) p.exactBought += k; }
+                    else { p.soldRevenue += lot.perUnit * k; if (lot.exact) p.exactSold += k; p.soldAtLedger = lot.market; }
+                }
+            return covered;
         }
 
         static bool SoldAtSinceLastLook(Snapshot snap, Plan p)
@@ -457,6 +518,16 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
             p.state = 2;
             p.autoDone = true;
             p.doneAt = DateTime.Now.ToString("MM-dd HH:mm");
+            // The mod's checkout ledger saw every unit sold: where and for how much are known to the credit.
+            if (p.boughtQty > 0 && p.exactSold >= p.boughtQty && p.soldAtLedger != null)
+            {
+                bool planned = p.soldAtLedger == p.sellName;
+                p.actualPaid = true;
+                p.doneNote = (planned ? "在计划的 " : "在 ") + p.soldAtLedger + " 卖出" + (planned ? "" : "（不是计划的站）") + "，到手按结账记录";
+                ReleaseKeepFresh(p, cfg);
+                cfg.Save();
+                return;
+            }
             long since = p.boughtMM >= 0 ? p.boughtMM : p.createdMM;
             int units; double paid;
             PlayerSales(snap.markets.Find(m => m.uid == p.sellUid), p.gid, since, out units, out paid);
@@ -600,7 +671,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                     var pt = new PlanPoint
                     {
                         time = DateTime.Now.ToString("HH:mm:ss"), gameMM = GameMM(),
-                        cost = p.state == 0 ? p.curCost : p.planCost, revenue = p.curRevenue, profit = p.CurProfit,
+                        cost = p.state == 0 ? p.curCost : p.Cost, revenue = p.curRevenue, profit = p.CurProfit,
                         buyPending = p.buyMarket != null ? p.buyMarket.pendingDays : -1, sellPending = p.sellMarket != null ? p.sellMarket.pendingDays : -1,
                     };
                     var last = p.history.Count > 0 ? p.history[p.history.Count - 1] : null;
