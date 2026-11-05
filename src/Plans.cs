@@ -362,6 +362,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                 Ledger.pending.Clear();
                 return true;
             }
+            unexplained.Clear();
             // Checkouts since the last look (the mod's ledger): which units were bought or sold, where, for how much.
             var bought = Lots(true);
             var sold = Lots(false);
@@ -399,7 +400,12 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                 }
                 else
                 {
-                    int n = -d;
+                    // Only units seen leaving by a sale count as sold: the checkout ledger, the markets' trade records
+                    // since the last look, or (special goods, which leave no record) a market store that grew. Bases
+                    // use up materials and the player moves things around: such a drop is not a sale (the plan then
+                    // shows the goods as missing).
+                    int n = Math.Min(-d, SoldEvidence(snap, key, sold));
+                    if (n < -d) unexplained[key] = -d - n;
                     // Plans of the same goods are interchangeable in the hold; the units gone count first for the plans
                     // whose sell market shows the sale (a trade record or, for special goods, a larger store since the
                     // last look), then for plans whose units the inventory had at the last look (not a plan marked
@@ -436,6 +442,30 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
         }
 
         class Lot { public long uid; public string market; public int qty; public double perUnit; public bool exact; }
+
+        // Units of a goods drop since the last look that some sale accounts for (an upper bound; see FollowInventory).
+        static int SoldEvidence(Snapshot snap, string key, Dictionary<string, List<Lot>> sold)
+        {
+            int ledger = 0;
+            List<Lot> l;
+            if (sold.TryGetValue(key, out l)) foreach (var lot in l) ledger += lot.qty;
+            if (lastLookMM < 0) return ledger;
+            string gid;
+            if (!snap.itemKeyToGid.TryGetValue(key, out gid)) return ledger;
+            int records = 0, grown = 0;
+            foreach (var m in snap.markets)
+            {
+                int units; double paid;
+                PlayerSales(m, gid, lastLookMM, out units, out paid);
+                records += units;
+                GoodsQuote q; int before;
+                if (m.byGid.TryGetValue(gid, out q) && q.special && lastStock.TryGetValue(m.uid + "|" + gid, out before) && q.stock > before) grown += q.stock - before;
+            }
+            return Math.Max(ledger, Math.Max(records, grown));
+        }
+
+        // Goods whose holding dropped at the last look without a sale to account for it (units), for the plans' notes.
+        static readonly Dictionary<string, int> unexplained = new Dictionary<string, int>();
 
         static Dictionary<string, List<Lot>> Lots(bool buy)
         {
@@ -615,8 +645,12 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                 {
                     int owned = snap.Owned(p.key), claimed = 0;
                     foreach (var o in list) if (o.key == p.key && o.state == 1) claimed += o.HoldQty;
-                    p.note = "库存里只有 " + owned + " 个" + p.name + "，进行中的计划合计算了 " + claimed + " 个，这个计划有 " + p.missing + " 个对不上"
-                           + (p.autoBought ? "" : "（它是手动改成已买入的，可能还没真买）") + "。没买就点「改回待买入」，不要了就删除。";
+                    if (p.buyUid < 0)
+                        p.note = "库存里只有 " + owned + " 个" + p.name + "，比这个计划少 " + p.missing + " 个，而且没有卖出记录：可能被基地生产用掉或搬走了。可以删掉，在“卖库存”里重新追踪。";
+                    else
+                        p.note = "库存里只有 " + owned + " 个" + p.name + "，进行中的计划合计算了 " + claimed + " 个，这个计划有 " + p.missing + " 个对不上"
+                               + (p.autoBought ? "" : "（它是手动改成已买入的，可能还没真买）")
+                               + (unexplained.ContainsKey(p.key) ? "；库存少了但没有卖出记录，可能被用掉或搬走了" : "") + "。没买就点「改回待买入」，不要了就删除。";
                 }
                 p.sellAhead = p.buyAhead = 0;
                 p.buyMarket = snap.markets.Find(m => m.uid == p.buyUid);

@@ -548,6 +548,22 @@ namespace TradeHelper
             heldFlag &= plan.state == 1 && plan.stillHeld == 0 && plan.missing == 0;
             c.details.Add("改回已买入: " + plan.StateText + (plan.state == 1 ? " ok" : " WRONG"));
 
+            // One unit leaves the hold without a sale (used up or moved, as bases do with materials): not counted as sold;
+            // the plan shows it missing. Putting it back clears that.
+            FWThingBean taken = null;
+            Locked(() =>
+            {
+                var st = ctx.GetTradeThings()?.Find(t => t != null && t.type == probeType && t.id == probeId && t.getSum() > 0);
+                if (st != null) { taken = st.copyBean(); taken.setSum(1); ctx.RemoveSoldItems(new List<FWThingBean> { taken.copyBean() }); }
+            });
+            yield return Refresh();
+            bool notSold = taken != null && plan.state == 1 && plan.soldQty == 0 && plan.missing == 1 && plan.StateText == "② 库存缺 1" && plan.note.Contains("没有卖出记录");
+            c.details.Add("one unit gone without a sale: " + plan.StateText + ", sold " + plan.soldQty + " / " + plan.note + (notSold ? " ok" : " WRONG"));
+            if (taken != null) Locked(() => ctx.AddBoughtItems(new List<FWThingBean> { taken.copyBean() }, qb.market.ex));
+            yield return Refresh();
+            notSold &= plan.state == 1 && plan.missing == 0 && plan.soldQty == 0;
+            c.details.Add("unit put back: " + plan.StateText + (plan.missing == 0 ? " ok" : " WRONG"));
+
             // A second plan of the same goods, earlier in the queue, selling at the same market, marked bought by hand
             // although nothing more was bought (what a player did): it must be shown as not in the inventory, must not
             // push the real plan down the market's queue, and the sale below must count for the real plan.
@@ -611,7 +627,7 @@ namespace TradeHelper
             var route = Plans.Routes().Find(r => r.name == qb.name && r.to == plan.sellName && !r.held);
             bool routeOk = route != null && route.count == 1 && route.units == k && SameMoney(route.profit, payS - idea.cost);
             c.details.Add("route summary: " + (route == null ? "missing" : route.count + " time(s), " + route.units + " units, profit " + route.profit.ToString("0") + " (expected " + (payS - idea.cost).ToString("0") + ")") + (routeOk ? " ok" : " WRONG"));
-            c.passed = buyOk && stage2 && bestOk && heldFlag && decoyFlag && unbought && sellOk && stage3 && decoyKept && creditsOk && routeOk;
+            c.passed = buyOk && stage2 && bestOk && heldFlag && notSold && decoyFlag && unbought && sellOk && stage3 && decoyKept && creditsOk && routeOk;
             c.summary = (c.passed ? "all steps match" : "some steps differ") + " (" + qb.name + " " + qb.market.name + " -> " + qs.market.name + ")";
         }
 
@@ -690,6 +706,7 @@ namespace TradeHelper
                 foreach (var q in m.goods)
                 {
                     if (!q.ship || !q.buyable || q.contraband || q.shipDefects == null || q.shipDefects.Length == 0 || q.shipDefects[0] != 0) continue;
+                    if (q.buy1 > gd.creditPoint * 0.8) continue;   // the save must be able to pay for it
                     foreach (var m2 in snap.markets)
                     {
                         GoodsQuote q2;
@@ -699,7 +716,8 @@ namespace TradeHelper
                     if (qb != null) break;
                 }
             }
-            if (qb == null || DoCheckout == null) { c.passed = false; c.summary = qb == null ? "no defect-free ship with two up-to-date markets" : "DoCheckout not found"; yield break; }
+            if (qb == null && DoCheckout != null) { c.info = true; c.passed = true; c.summary = "skipped: no affordable defect-free ship with two up-to-date markets (credits " + gd.creditPoint + ")"; yield break; }
+            if (qb == null || DoCheckout == null) { c.passed = false; c.summary = "DoCheckout not found"; yield break; }
             var idea = new TradeIdea { gid = qb.gid, name = qb.name, category = qb.category, buy = qb, sell = qs, qty = 1, cost = qb.BuyCost(1), revenue = qs.SellBoughtRevenue(0, qb, 0, 1) };
             Plan plan = null;
             Locked(() => plan = Plans.FromTrade(idea, snap, host.Cfg, host.settlement));
