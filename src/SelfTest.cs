@@ -170,6 +170,24 @@ namespace TradeHelper
             if (req.tests == "all" || req.tests.Contains("trade")) yield return Guard(TradeTest(), "real trade: buy, plan stages, sell");
             if (req.tests == "all" || req.tests.Contains("ledger")) yield return Guard(LedgerTest(), "checkout ledger: the game's own checkout");
             if (req.tests == "all" || req.tests.Contains("ship")) yield return Guard(ShipTest(), "ship trade: the game's own checkout");
+            {
+                // The advice page lists every category; picking one without a paying route shows its best margin.
+                var cc = new Check { name = "advice page: all categories, notes for the unprofitable" };
+                result.checks.Add(cc);
+                host.SetVisible(true);
+                host.ShowTab(0);
+                yield return new WaitForSecondsRealtime(1.5f);
+                var tv = Ui.TradesView.Current;
+                string pick = null;
+                foreach (var k in host.Latest.categoryNote.Keys) { pick = k; if (k == "战舰") break; }
+                if (tv != null && pick != null) tv.PickCategory(pick);
+                yield return new WaitForSecondsRealtime(0.5f);
+                yield return Shot("advice-category");
+                cc.passed = tv != null && pick != null && tv.CategoryOptions.Count == host.Latest.tradeCategories.Count + 1 && tv.EmptyText.Contains("差价最好") || (tv != null && pick != null && tv.EmptyText.Contains("没法倒卖"));
+                cc.summary = (tv == null ? "no page" : tv.CategoryOptions.Count - 1 + " categories in the dropdown; picked " + pick + ": " + tv.EmptyText);
+                if (tv != null) tv.PickCategory("全部类别");
+                host.SetVisible(false);
+            }
             if (req.tests == "all" || req.tests.Contains("ui")) yield return Guard(UiInputTest(), "ui: search boxes take clicks");
             yield return Guard(CatchUpSmoothness(false), "catch-up smoothness");
 
@@ -1230,6 +1248,16 @@ namespace TradeHelper
                 else if (!s.market.market.Explored) why = "not explored";
                 if (why != null) { bad++; if (c.details.Count < 15) c.details.Add("sell " + why + ": " + s.name + " -> " + s.market.market.name); }
             }
+            // Every category is listed; every one without a paying route has a note.
+            var payingCats = new HashSet<string>(snap.trades.ConvertAll(t => t.category));
+            foreach (var cat in snap.tradeCategories)
+            {
+                string note;
+                bool has = snap.categoryNote.TryGetValue(cat, out note);
+                if (!payingCats.Contains(cat) && !has) { bad++; c.details.Add("category without a note: " + cat); }
+                else if (has) c.details.Add("note: " + note);
+            }
+            c.details.Add("categories: " + string.Join("、", snap.tradeCategories) + " (" + payingCats.Count + " with paying routes)");
             c.passed = bad == 0;
             c.summary = snap.trades.Count + " trade ideas, " + snap.sells.Count + " sell ideas, " + bad + " break the rules";
             return c;

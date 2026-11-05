@@ -284,6 +284,10 @@ namespace TradeHelper
         public Dictionary<string, string> gidCategory = new Dictionary<string, string>();
         public List<string> errors = new List<string>();
         public List<TradeIdea> trades = new List<TradeIdea>();
+        // Every category of goods tradable between the usable markets, and for each one without a paying route, a line
+        // about the best first-unit margin (after both taxes), so the page can show it instead of an empty table.
+        public List<string> tradeCategories = new List<string>();
+        public Dictionary<string, string> categoryNote = new Dictionary<string, string>();
         public List<SellIdea> sells = new List<SellIdea>();
         public long scanMs;
         public int marketsDone, marketsTotal, marketsReused;

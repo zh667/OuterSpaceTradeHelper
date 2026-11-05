@@ -36,13 +36,13 @@ namespace TradeHelper.Ui
             var pIdx = Array.IndexOf(ProfitOpts, cfg.minProfit);
             Drop("最低净赚：", x, 0, 190, new List<string> { "不限", "1 万", "10 万", "50 万", "100 万", "500 万" }, pIdx < 0 ? 0 : pIdx, i => { cfg.minProfit = ProfitOpts[i]; cfg.Save(); table.Resort(); });
             x += 198;
-            cat = Drop("", x, 0, 170, new List<string> { "全部类别" }, 0, i => { category = i == 0 ? null : cat.options[i]; table.Resort(); });
+            cat = Drop("", x, 0, 170, new List<string> { "全部类别" }, 0, i => { category = i == 0 ? null : cat.options[i]; UpdateEmptyText(); table.Resort(); });
             x += 178;
             Kit.Input(root, "搜索商品或站名", x, 0, 220, 30, s => { search = s; table.Resort(); });
             x += 228;
             sort = Drop("排序：", x, 0, w.BodyW - x, new List<string> { "净赚从高到低", "每光年净赚从高到低", "利润率从高到低", "到手从高到低", "成本从低到高", "舰队距离从近到远", "航程从近到远" }, 0,
                 i => { table.sortCol = SortCol[i]; table.desc = SortDesc[i]; table.Resort(); SaveSort(); });
-            Kit.TxtAt(root, "算到“再多买就开始亏”为止，两边税都扣了。违禁品和舰队没去过（未探索）的星系不出现。站名是“星系·空间站”，在那个空间站点「贸易市场」交易。* = 已扣掉你计划里同一站要买/卖的数量。“估”= 那个站欠结算天数。", 0, 34, w.BodyW - 200, 22, 14, Theme.Text2);
+            Kit.TxtAt(root, Hint, 0, 34, w.BodyW - 200, 22, 14, Theme.Text2);
             Kit.Toggle(root, "含未探索的星系", w.BodyW - 190, 31, 190, cfg.includeUndiscovered, v => { cfg.includeUndiscovered = v; cfg.Save(); host.RequestRefresh(true); });
 
             var cols = new List<Column<TradeIdea>>
@@ -64,10 +64,13 @@ namespace TradeHelper.Ui
                     onButton = t => { if (snap != null) Plans.FromTrade(t, snap, cfg, host.settlement); host.PlansChanged(); } },
             };
             table = new Table<TradeIdea>(root, 0, 60, w.BodyW, w.BodyH - 60, cols, cfg.tradesSort, cfg.tradesDesc);
-            table.emptyText = "没有扣税后能赚钱的组合（或都被筛掉了）。可以放宽“数据”或先在“后台补算”页补算更多站。";
+            table.emptyText = DefaultEmpty;
+            Current = this;
             table.filter = t => WithinLy(t.fleetAu, cfg.maxFleetLy) && t.Profit >= cfg.minProfit && (category == null || t.category == category) && Match(search, t.name, t.buy.market.name, t.sell.market.name);
             table.sortChanged = (c, d) => SaveSort();
         }
+
+        const string Hint = "算到“再多买就开始亏”为止，两边税都扣了。违禁品和舰队没去过（未探索）的星系不出现。类别里没有赚钱路线的，会显示差价最好的那条亏多少。* = 已扣掉计划占用；“估”= 欠结算天数。";
 
         static bool Tracked(TradeIdea t) => Plans.list.Exists(p => p.state != 2 && p.gid == t.gid && p.buyUid == t.buy.market.uid && p.sellUid == t.sell.market.uid);
 
@@ -76,13 +79,36 @@ namespace TradeHelper.Ui
         public override void OnSnapshot(Snapshot s)
         {
             base.OnSnapshot(s);
-            var cats = new List<string>();
+            // Every category the usable markets trade, paying or not (s.tradeCategories); trade ideas' categories too.
+            var cats = new List<string>(s.tradeCategories);
             foreach (var t in s.trades) cats.Add(t.category);
             var l = Categories(s, cats);
             cat.SetOptions(l, category == null ? 0 : Math.Max(0, l.IndexOf(category)));
             if (cat.index == 0) category = null;
+            UpdateEmptyText();
             table.SetData(s.trades);
         }
+
+        // For the self-test: the open advice page, picking a category as the dropdown would.
+        public static TradesView Current;
+        public void PickCategory(string name)
+        {
+            int i = cat.options.IndexOf(name);
+            if (i < 0) return;
+            cat.index = i; cat.label.text = name;
+            category = name; UpdateEmptyText(); table.Resort();
+        }
+        public string EmptyText => table.emptyText;
+        public List<string> CategoryOptions => cat.options;
+
+        // A category with no paying route shows the best margin there and what each unit would lose.
+        void UpdateEmptyText()
+        {
+            string note;
+            table.emptyText = category != null && snap != null && snap.categoryNote.TryGetValue(category, out note) ? note : DefaultEmpty;
+        }
+
+        const string DefaultEmpty = "没有扣税后能赚钱的组合（或都被筛掉了）。可以放宽“数据”或先在“后台补算”页补算更多站。";
     }
 
     public class SellsView : ViewBase
