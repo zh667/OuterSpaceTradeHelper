@@ -561,7 +561,7 @@ namespace TradeHelper.Ui
             {
                 new Column<Plan> { title = "商品", width = 130, text = p => p.name, key = p => p.name },
                 new Column<Plan> { title = "数量", width = 48, text = p => p.ShownQty.ToString(), key = p => p.ShownQty, numeric = true, align = TextAlignmentOptions.MidlineRight },
-                new Column<Plan> { title = "状态", width = 144, text = p => p.StateText, key = p => p.state, numeric = true, color = p => p.state == 0 ? Theme.Accent : p.state == 1 ? Theme.Good : Theme.Text2 },
+                new Column<Plan> { title = "状态", width = 144, text = p => p.StateText, key = p => p.state, numeric = true, color = p => p.state == 1 && p.missing > 0 ? Theme.Bad : p.state == 0 ? Theme.Accent : p.state == 1 ? Theme.Good : Theme.Text2 },
                 new Column<Plan> { title = "在哪买", width = 176, text = p => Station(p.buyName, p.buyMarket), key = p => p.buyName, color = p => p.buyMarket != null ? Fmt.FreshColor(p.buyMarket) : Theme.Text2 },
                 new Column<Plan> { title = "去哪卖", width = 176, text = p => Station(p.sellName, p.sellMarket), key = p => p.sellName, color = p => p.sellMarket != null ? Fmt.FreshColor(p.sellMarket) : Theme.Text2 },
                 new Column<Plan> { title = "计划净赚", width = 90, text = p => Fmt.Money(p.PlanProfit), key = p => p.PlanProfit, numeric = true, align = TextAlignmentOptions.MidlineRight },
@@ -572,8 +572,15 @@ namespace TradeHelper.Ui
                 new Column<Plan> { title = "比计划", width = 64, text = p => Change(p, p.BestProfit), key = p => double.IsNaN(p.BestProfit) ? (IComparable)null : p.BestProfit - p.PlanProfit, numeric = true, align = TextAlignmentOptions.MidlineRight, color = p => ChangeColor(p, p.BestProfit) },
                 new Column<Plan> { title = "舰队→下一站", width = 104, text = p => Fmt.Dist(p.fleetToNextAu), key = p => p.fleetToNextAu < 0 ? (IComparable)null : p.fleetToNextAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<Plan> { title = "两站实时", width = 92, checkGet = p => p.keepFresh, checkSet = (p, v) => { p.keepFresh = v; Plans.ApplyKeepFresh(p, cfg, host.settlement); Plans.Save(); } },
-                new Column<Plan> { title = "手动改状态", width = 100, buttonText = p => p.state == 0 ? "改为已买入" : p.state == 1 ? "改为已完成" : "改回已买入",
-                    onButton = p => { if (p.state == 0) Plans.MarkBought(p, cfg, host.settlement); else if (p.state == 1) Plans.MarkDone(p, cfg); else Plans.Reopen(p, cfg, host.settlement); Refresh(); } },
+                new Column<Plan> { title = "手动改状态", width = 100, buttonText = p => p.state == 0 ? "改为已买入" : p.state == 1 ? (p.missing > 0 && p.soldQty == 0 ? "改回待买入" : "改为已完成") : "改回已买入",
+                    onButton = p =>
+                    {
+                        if (p.state == 0) Plans.MarkBought(p, cfg, host.settlement);
+                        else if (p.state == 1 && p.missing > 0 && p.soldQty == 0) Plans.MarkUnbought(p, cfg, host.settlement);
+                        else if (p.state == 1) Plans.MarkDone(p, cfg);
+                        else Plans.Reopen(p, cfg, host.settlement);
+                        Refresh();
+                    } },
                 new Column<Plan> { title = "", width = 60, buttonText = _ => "删除", onButton = p => { Plans.Remove(p, cfg); if (selected == p) selected = null; Refresh(); } },
             };
             table = new Table<Plan>(root, 0, 70, w.BodyW, w.BodyH - 70 - 190, cols, 2, false);

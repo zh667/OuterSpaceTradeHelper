@@ -52,6 +52,9 @@ namespace TradeHelper
         [JsonIgnore] [NonSerialized] public string note = "";
         // Units of the same goods that other open plans sell (or buy) at the same station before this one.
         [JsonIgnore] [NonSerialized] public int sellAhead, buyAhead;
+        // Units this plan counts as in hand that the inventory does not have (the open plans of this goods together claim
+        // more than the player holds, e.g. a plan marked bought by hand before buying).
+        [JsonIgnore] [NonSerialized] public int missing;
         [JsonIgnore] [NonSerialized] public DateTime lastPointAt = DateTime.MinValue;
 
         [JsonIgnore] public double PlanProfit => planRevenue - planCost;
@@ -68,7 +71,8 @@ namespace TradeHelper
         // Units still to buy (stage 1) or still in hand to sell (stage 2).
         [JsonIgnore] public int HoldQty => state == 0 ? qty : Math.Max(0, boughtQty - soldQty);
         [JsonIgnore] public int ShownQty => state == 2 ? boughtQty : HoldQty;
-        [JsonIgnore] public string StateText => state == 0 ? "① 待买入"
+        [JsonIgnore] public string StateText => state == 1 && missing > 0 ? (missing >= HoldQty ? "② 库存里没有" : "② 库存缺 " + missing)
+                                              : state == 0 ? "① 待买入"
                                               : state == 1 ? (soldQty > 0 ? "② 已卖 " + soldQty + "/" + boughtQty : "② 已买 " + boughtQty + "，待卖")
                                               : (autoDone ? "③ 已完成·自动" : "③ 已完成");
     }
@@ -92,6 +96,7 @@ namespace TradeHelper
         // wings, creatures...) leaves no trade record in the game (the checkout only puts the items back into the
         // store), so the market whose store grew tells where they went.
         static Dictionary<string, int> lastStock = new Dictionary<string, int>();
+        static long lastLookMM = -1;            // game clock at the last look (sales after it are new)
         // Bumped whenever the set of plans or a plan's stage changes (advice depends on it; history points do not).
         public static int version;
         static string Path => System.IO.Path.Combine(Config.Dir, "plans.json");
@@ -245,6 +250,18 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
         }
 
         // Undo an automatic completion (e.g. the goods were moved somewhere this panel does not see).
+        // Back to "to buy" (a plan marked bought by hand that was not bought); the next purchase is seen as usual.
+        public static void MarkUnbought(Plan p, Config cfg, Settlement st)
+        {
+            p.state = 0;
+            p.boughtQty = 0; p.soldQty = 0; p.soldRevenue = 0;
+            p.autoBought = false; p.boughtAt = null; p.boughtMM = -1;
+            p.missing = 0;
+            version++;
+            ApplyKeepFresh(p, cfg, st);
+            Save();
+        }
+
         public static void Reopen(Plan p, Config cfg, Settlement st)
         {
             p.state = 1;
@@ -364,7 +381,20 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                 else
                 {
                     int n = -d;
-                    foreach (var p in order)
+                    // Plans of the same goods are interchangeable in the hold; the units gone count first for the plans
+                    // whose sell market shows the sale (a trade record or, for special goods, a larger store since the
+                    // last look), then in queue order.
+                    var byPlace = new List<Plan>(order);
+                    var soldHere = new Dictionary<Plan, bool>();
+                    foreach (var p in byPlace) if (p.key == key && p.state == 1) soldHere[p] = SoldAtSinceLastLook(snap, p);
+                    byPlace.Sort((a, b) =>
+                    {
+                        bool sa, sb;
+                        soldHere.TryGetValue(a, out sa); soldHere.TryGetValue(b, out sb);
+                        int c = (sa ? 0 : 1).CompareTo(sb ? 0 : 1);
+                        return c != 0 ? c : order.IndexOf(a).CompareTo(order.IndexOf(b));
+                    });
+                    foreach (var p in byPlace)
                     {
                         if (n <= 0) break;
                         if (p.key != key || p.state != 1) continue;
@@ -380,6 +410,44 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
             }
             foreach (var k in new List<string>(lastOwned.Keys)) if (!keys.Contains(k)) { lastOwned.Remove(k); changed = true; }
             return changed;
+        }
+
+        static bool SoldAtSinceLastLook(Snapshot snap, Plan p)
+        {
+            if (lastLookMM < 0) return false;
+            var m = snap.markets.Find(x => x.uid == p.sellUid);
+            if (m == null) return false;
+            int units; double paid;
+            PlayerSales(m, p.gid, lastLookMM, out units, out paid);
+            if (units > 0) return true;
+            GoodsQuote q; int before;
+            return m.byGid.TryGetValue(p.gid, out q) && q.special && lastStock.TryGetValue(m.uid + "|" + p.gid, out before) && q.stock > before;
+        }
+
+        // Open plans that together claim more units in hand than the inventory has: the excess is put on plans marked
+        // bought by hand first (the usual cause), then on the newest.
+        static void CheckHoldings(Snapshot snap, List<Plan> order)
+        {
+            foreach (var p in order) p.missing = 0;
+            if (snap.inventory.Count == 0 || snap.errors.Exists(e => e.StartsWith("读舰队货仓失败") || e.StartsWith("读空间站仓库失败"))) return;
+            var keys = new HashSet<string>();
+            foreach (var p in order) if (p.state == 1 && p.key != null) keys.Add(p.key);
+            foreach (var key in keys)
+            {
+                var holders = order.FindAll(p => p.key == key && p.state == 1);
+                int claimed = 0;
+                foreach (var p in holders) claimed += p.HoldQty;
+                int excess = claimed - snap.Owned(key);
+                if (excess <= 0) continue;
+                holders.Reverse();   // newest first
+                holders.Sort((a, b) => (a.autoBought || a.buyUid < 0 ? 1 : 0).CompareTo(b.autoBought || b.buyUid < 0 ? 1 : 0));
+                foreach (var p in holders)
+                {
+                    if (excess <= 0) break;
+                    p.missing = Math.Min(excess, p.HoldQty);
+                    excess -= p.missing;
+                }
+            }
         }
 
         static void Complete(Plan p, Snapshot snap, Config cfg)
@@ -446,9 +514,17 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
             foreach (var o in list)
                 if (o.state != 2) { var k = o.sellUid + "|" + o.gid; int v; sellTotal.TryGetValue(k, out v); sellTotal[k] = v + o.HoldQty; }
             changed |= FollowInventory(snap, cfg, order);
+            CheckHoldings(snap, order);
             foreach (var p in order)
             {
                 p.note = "";
+                if (p.missing > 0)
+                {
+                    int owned = snap.Owned(p.key), claimed = 0;
+                    foreach (var o in list) if (o.key == p.key && o.state == 1) claimed += o.HoldQty;
+                    p.note = "库存里只有 " + owned + " 个" + p.name + "，进行中的计划合计算了 " + claimed + " 个，这个计划有 " + p.missing + " 个对不上"
+                           + (p.autoBought ? "" : "（它是手动改成已买入的，可能还没真买）") + "。没买就点「改回待买入」，不要了就删除。";
+                }
                 p.sellAhead = p.buyAhead = 0;
                 p.buyMarket = snap.markets.Find(m => m.uid == p.buyUid);
                 p.sellMarket = snap.markets.Find(m => m.uid == p.sellUid);
@@ -537,6 +613,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                 }
             }
             RememberStock(snap);
+            lastLookMM = GameMM();
             if (changed) Save();
         }
 

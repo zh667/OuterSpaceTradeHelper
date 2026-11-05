@@ -494,6 +494,23 @@ namespace TradeHelper
             bestOk &= detailOk;
             host.SetVisible(false);
 
+            // A second plan of the same goods, earlier in the queue, selling elsewhere, marked bought by hand although
+            // nothing more was bought: it must be shown as not in the inventory, and the sale below must count for
+            // the plan whose market took the goods, not for this one.
+            var decoy = JsonConvert.DeserializeObject<Plan>(JsonConvert.SerializeObject(plan));
+            decoy.sellUid = qb.market.uid; decoy.sellName = qb.market.name; decoy.createdMM = plan.createdMM - 1;
+            decoy.state = 0; decoy.boughtQty = 0; decoy.autoBought = false; decoy.history = new List<PlanPoint>(); decoy.addedKeepFresh = new List<long>();
+            Plans.list.Insert(0, decoy);
+            Plans.MarkBought(decoy, host.Cfg, host.settlement);
+            yield return Refresh();
+            bool decoyFlag = decoy.missing == k && plan.missing == 0 && decoy.StateText == "② 库存里没有" && decoy.note.Contains("手动");
+            c.details.Add("plan marked bought by hand without buying: " + decoy.StateText + " missing " + decoy.missing + ", real plan missing " + plan.missing + (decoyFlag ? " ok" : " WRONG"));
+            Plans.MarkUnbought(decoy, host.Cfg, host.settlement);
+            bool unbought = decoy.state == 0 && decoy.boughtQty == 0;
+            Plans.MarkBought(decoy, host.Cfg, host.settlement);   // keep it (claiming units) through the sale
+            yield return Refresh();
+            c.details.Add("改回待买入: " + (unbought ? "back to stage 1 ok" : "WRONG"));
+
             // Sell the bought items at the plan's sell market.
             double estimate = plan.curRevenue;
             bool sellOk = false;
@@ -530,12 +547,15 @@ namespace TradeHelper
             yield return Refresh();
             bool stage3 = plan.state == 2 && plan.autoDone && plan.doneNote != null && plan.doneNote.Contains(qs.market.name);
             c.details.Add("after selling: " + plan.StateText + " / " + plan.doneNote + (stage3 ? " ok" : " WRONG"));
+            bool decoyKept = decoy.state == 1 && decoy.soldQty == 0;
+            c.details.Add("sale counted for the plan selling there: real plan " + plan.StateText + ", other plan " + decoy.StateText + " sold " + decoy.soldQty + (decoyKept ? " ok" : " WRONG"));
+            Plans.Remove(decoy, host.Cfg);
             bool creditsOk = gd.creditPoint == cp0 - payB + payS;
             c.details.Add("credits " + cp0 + " -> " + gd.creditPoint + (creditsOk ? " ok" : " WRONG"));
             var route = Plans.Routes().Find(r => r.name == qb.name && r.to == plan.sellName && !r.held);
             bool routeOk = route != null && route.count == 1 && route.units == k && SameMoney(route.profit, payS - idea.cost);
             c.details.Add("route summary: " + (route == null ? "missing" : route.count + " time(s), " + route.units + " units, profit " + route.profit.ToString("0") + " (expected " + (payS - idea.cost).ToString("0") + ")") + (routeOk ? " ok" : " WRONG"));
-            c.passed = buyOk && stage2 && bestOk && sellOk && stage3 && creditsOk && routeOk;
+            c.passed = buyOk && stage2 && bestOk && decoyFlag && unbought && sellOk && stage3 && decoyKept && creditsOk && routeOk;
             c.summary = (c.passed ? "all steps match" : "some steps differ") + " (" + qb.name + " " + qb.market.name + " -> " + qs.market.name + ")";
         }
 
