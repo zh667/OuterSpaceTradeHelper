@@ -494,17 +494,19 @@ namespace TradeHelper
             bestOk &= detailOk;
             host.SetVisible(false);
 
-            // A second plan of the same goods, earlier in the queue, selling elsewhere, marked bought by hand although
-            // nothing more was bought: it must be shown as not in the inventory, and the sale below must count for
-            // the plan whose market took the goods, not for this one.
+            // A second plan of the same goods, earlier in the queue, selling at the same market, marked bought by hand
+            // although nothing more was bought (what a player did): it must be shown as not in the inventory, must not
+            // push the real plan down the market's queue, and the sale below must count for the real plan.
             var decoy = JsonConvert.DeserializeObject<Plan>(JsonConvert.SerializeObject(plan));
-            decoy.sellUid = qb.market.uid; decoy.sellName = qb.market.name; decoy.createdMM = plan.createdMM - 1;
+            decoy.createdMM = plan.createdMM - 1;
             decoy.state = 0; decoy.boughtQty = 0; decoy.autoBought = false; decoy.history = new List<PlanPoint>(); decoy.addedKeepFresh = new List<long>();
             Plans.list.Insert(0, decoy);
             Plans.MarkBought(decoy, host.Cfg, host.settlement);
             yield return Refresh();
-            bool decoyFlag = decoy.missing == k && plan.missing == 0 && decoy.StateText == "② 库存里没有" && decoy.note.Contains("手动");
-            c.details.Add("plan marked bought by hand without buying: " + decoy.StateText + " missing " + decoy.missing + ", real plan missing " + plan.missing + (decoyFlag ? " ok" : " WRONG"));
+            bool decoyFlag = decoy.missing == k && plan.missing == 0 && decoy.StateText == "② 库存里没有" && decoy.note.Contains("手动")
+                             && plan.sellAhead == 0 && double.IsNaN(decoy.CurProfit) && decoy.alternatives.Count == 0;
+            c.details.Add("plan marked bought by hand without buying: " + decoy.StateText + " missing " + decoy.missing + ", real plan missing " + plan.missing
+                          + ", real plan queued behind " + plan.sellAhead + ", decoy profit " + decoy.CurProfit + " alternatives " + decoy.alternatives.Count + (decoyFlag ? " ok" : " WRONG"));
             Plans.MarkUnbought(decoy, host.Cfg, host.settlement);
             bool unbought = decoy.state == 0 && decoy.boughtQty == 0;
             Plans.MarkBought(decoy, host.Cfg, host.settlement);   // keep it (claiming units) through the sale

@@ -383,7 +383,8 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                     int n = -d;
                     // Plans of the same goods are interchangeable in the hold; the units gone count first for the plans
                     // whose sell market shows the sale (a trade record or, for special goods, a larger store since the
-                    // last look), then in queue order.
+                    // last look), then for plans whose units the inventory had at the last look (not a plan marked
+                    // bought by hand without buying), then in queue order.
                     var byPlace = new List<Plan>(order);
                     var soldHere = new Dictionary<Plan, bool>();
                     foreach (var p in byPlace) if (p.key == key && p.state == 1) soldHere[p] = SoldAtSinceLastLook(snap, p);
@@ -392,6 +393,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                         bool sa, sb;
                         soldHere.TryGetValue(a, out sa); soldHere.TryGetValue(b, out sb);
                         int c = (sa ? 0 : 1).CompareTo(sb ? 0 : 1);
+                        if (c == 0) c = (a.missing >= a.HoldQty ? 1 : 0).CompareTo(b.missing >= b.HoldQty ? 1 : 0);
                         return c != 0 ? c : order.IndexOf(a).CompareTo(order.IndexOf(b));
                     });
                     foreach (var p in byPlace)
@@ -510,11 +512,11 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
             });
             var soldAhead = new Dictionary<string, int>();
             var boughtAhead = new Dictionary<string, int>();
-            var sellTotal = new Dictionary<string, int>();
-            foreach (var o in list)
-                if (o.state != 2) { var k = o.sellUid + "|" + o.gid; int v; sellTotal.TryGetValue(k, out v); sellTotal[k] = v + o.HoldQty; }
             changed |= FollowInventory(snap, cfg, order);
             CheckHoldings(snap, order);
+            var sellTotal = new Dictionary<string, int>();
+            foreach (var o in list)
+                if (o.state != 2) { var k = o.sellUid + "|" + o.gid; int v; sellTotal.TryGetValue(k, out v); sellTotal[k] = v + o.HoldQty - o.missing; }
             foreach (var p in order)
             {
                 p.note = "";
@@ -536,7 +538,8 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                 if (p.buyMarket != null) p.buyMarket.byGid.TryGetValue(p.gid, out bq);
                 if (p.sellMarket != null) p.sellMarket.byGid.TryGetValue(p.gid, out sq);
 
-                int hold = p.HoldQty;
+                // Units not in the inventory are neither priced nor counted in the queue at the sell market.
+                int hold = p.HoldQty - p.missing;
                 if (p.state == 0)
                 {
                     if (bq == null) { p.curCost = double.NaN; p.note = "买入站现在没有这个货"; }
