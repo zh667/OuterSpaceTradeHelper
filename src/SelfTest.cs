@@ -164,6 +164,7 @@ namespace TradeHelper
             Run(() => CheckAdvice(snap));
             Run(() => CheckExploration(snap));
             Run(() => CheckShips(snap));
+            Run(() => InventoryPlaces(snap));
             Run(() => ProbeCalls(snap));
             Run(() => StationPlaces());
 
@@ -183,7 +184,9 @@ namespace TradeHelper
                 if (tv != null && pick != null) tv.PickCategory(pick);
                 yield return new WaitForSecondsRealtime(0.5f);
                 yield return Shot("advice-category");
-                cc.passed = tv != null && pick != null && tv.CategoryOptions.Count == host.Latest.tradeCategories.Count + 1 && tv.EmptyText.Contains("差价最好") || (tv != null && pick != null && tv.EmptyText.Contains("没法倒卖"));
+                bool listed = tv != null && tv.CategoryOptions.Count == host.Latest.tradeCategories.Count + 1;
+                cc.passed = listed && (pick == null || tv.EmptyText.Contains("差价最好") || tv.EmptyText.Contains("没法倒卖"));
+                if (pick == null) cc.info = true;   // every category pays in this save: nothing to pick
                 cc.summary = (tv == null ? "no page" : tv.CategoryOptions.Count - 1 + " categories in the dropdown; picked " + pick + ": " + tv.EmptyText);
                 if (tv != null) tv.PickCategory("全部类别");
                 host.SetVisible(false);
@@ -456,7 +459,7 @@ namespace TradeHelper
             string abort = null;
             FleetInventoryContext ctx = null;
             TradeIdea idea = null; Plan plan = null;
-            long cp0 = 0, payB = 0, payS = 0; int probeType = 0; string probeId = null; bool buyOk = false;
+            long cp0 = 0, payB = 0, payS = 0; int probeType = 0; string probeId = null; bool buyOk = false; float evNow = 1f;
 
             Locked(() =>
             {
@@ -506,10 +509,12 @@ namespace TradeHelper
                 if (bought.Count != k) { abort = "bought " + bought.Count + " hold items instead of " + k; return; }
                 probeType = bought[0].type; probeId = bought[0].id;
                 ctx.AddBoughtItems(bought, qb.market.ex);   // the hold takes the items over (the list may be emptied)
-                buyOk = SameMoney(payB, idea.cost);
+                // A galaxy price event (e.g. regional inflation x1.15) may have begun since the scan: prices scale with it.
+                evNow = FWGalaxyEventTradeEffects.Get(qb.market.ex.uid, qb.gid).Price;
+                buyOk = SameMoney(payB, idea.cost * evNow / Math.Max(1e-6, qb.eventFactor));
             });
             if (abort != null) { c.passed = false; c.summary = abort; yield break; }
-            c.details.Add("buy " + k + " " + qb.name + " at " + qb.market.name + ": charged " + payB + ", mod cost " + idea.cost.ToString("0") + (buyOk ? " ok" : " DIFFERENT"));
+            c.details.Add("buy " + k + " " + qb.name + " at " + qb.market.name + ": charged " + payB + ", mod cost " + idea.cost.ToString("0") + (evNow != qb.eventFactor ? " (price event since the scan: x" + qb.eventFactor + " -> x" + evNow + ")" : "") + (buyOk ? " ok" : " DIFFERENT"));
 
             yield return Refresh();
             bool stage2 = plan.state == 1 && plan.boughtQty == k && plan.autoBought;
@@ -629,6 +634,35 @@ namespace TradeHelper
             c.details.Add("route summary: " + (route == null ? "missing" : route.count + " time(s), " + route.units + " units, profit " + route.profit.ToString("0") + " (expected " + (payS - idea.cost).ToString("0") + ")") + (routeOk ? " ok" : " WRONG"));
             c.passed = buyOk && stage2 && bestOk && heldFlag && notSold && decoyFlag && unbought && sellOk && stage3 && decoyKept && creditsOk && routeOk;
             c.summary = (c.passed ? "all steps match" : "some steps differ") + " (" + qb.name + " " + qb.market.name + " -> " + qs.market.name + ")";
+        }
+
+        // Where the player's goods are: every mothership deck and goods in transit are read (a player's goods moved to
+        // the mothership's cargo deck were missed when only the fleet's deck was read).
+        Check InventoryPlaces(Snapshot snap)
+        {
+            var c = new Check { name = "inventory: mothership decks and goods in transit", info = true };
+            var gd = MarketScanner.Game;
+            int decks = 0, deckThings = 0, freights = 0, freightThings = 0;
+            foreach (var map in gd.mothership?.starMapList ?? new List<FWStarMapInfo>())
+            {
+                if (map?.starSpread == null) continue;
+                decks++; deckThings += map.starSpread.things?.Count ?? 0;
+                c.details.Add("deck " + map.starMapId + " " + map.name + ": " + (map.starSpread.things?.Count ?? 0) + " stacks, freights " + (map.freightList?.Count ?? 0));
+                foreach (var f in map.freightList ?? new List<FWFreight>()) { freights++; freightThings += f?.things?.Count ?? 0; }
+            }
+            foreach (var loc in snap.inventory) c.details.Add(loc.name + ": " + loc.items.Count + " goods, " + loc.items.Values.Sum() + " units");
+            foreach (var key in new[] { "17_45020", "12_69", "12_99", "12_22" })
+            {
+                var where = new List<string>();
+                foreach (var loc in snap.inventory) { int v; if (loc.items.TryGetValue(key, out v)) where.Add(loc.name + " " + v); }
+                c.details.Add(MarketScanner.ItemName(snap, key) + ": " + (where.Count == 0 ? "none" : string.Join("、", where)));
+            }
+            int exps = 0, expThings = 0;
+            foreach (var ex in gd.expeditionSeq ?? new List<FWExpedition>()) { exps++; expThings += ex?.things?.Count ?? 0; }
+            c.details.Add("transports under way: " + exps + " (" + expThings + " stacks)");
+            c.passed = true;
+            c.summary = decks + " mothership decks (" + deckThings + " stacks), " + freights + " freights to mothership decks (" + freightThings + " stacks)";
+            return c;
         }
 
         // Ships: every ship in an up-to-date store priced by the mod as the trade page prices it (one ship at a time,

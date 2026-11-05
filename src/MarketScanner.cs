@@ -1098,15 +1098,24 @@ namespace TradeHelper
         static void ScanInventory(FWGameData gd, Snapshot snap)
         {
             var seen = new HashSet<long>();
-            FWStarMapInfo mother = null;
-            try { mother = gd.getMothershipStarMapInfo(); } catch { }
-            if (mother != null && mother.starSpread != null)
+            var scannedMaps = new List<FWStarMapInfo>();
+            // The mothership is several maps (decks: gd.mothership.starMapList); getMothershipStarMapInfo() gives only the
+            // one the fleet is bound to, so goods on the cargo deck were missed. Read every deck.
+            var motherLoc = new InvLocation { name = "母舰", galaxyId = snap.fleetGalaxyId };
+            try
             {
-                var loc = new InvLocation { name = "母舰", galaxyId = snap.fleetGalaxyId };
-                AddThings(loc, new List<FWThingBean>(mother.starSpread.things), snap);
-                seen.Add(mother.starMapId);
-                snap.inventory.Add(loc);
+                var decks = gd.mothership?.starMapList;
+                if (decks != null)
+                    foreach (var map in new List<FWStarMapInfo>(decks))
+                    {
+                        if (map?.starSpread == null || seen.Contains(map.starMapId)) continue;
+                        seen.Add(map.starMapId);
+                        scannedMaps.Add(map);
+                        AddThings(motherLoc, new List<FWThingBean>(map.starSpread.things), snap);
+                    }
             }
+            catch (Exception e) { snap.errors.Add("读母舰甲板失败: " + e.Message); }
+            snap.inventory.Add(motherLoc);
             var gals = gd.galaxyBlock?.knownGalaxies;
             if (gals != null)
                 foreach (var g in gals)
@@ -1120,6 +1129,7 @@ namespace TradeHelper
                             if (map == null || map.starSpread == null || seen.Contains(map.starMapId)) continue;
                             if (map.type != FWStarMapInfo.TYPE_DEPUTY_BASE && map.type != FWStarMapInfo.TYPE_ROOT_BASE) continue;
                             seen.Add(map.starMapId);
+                            scannedMaps.Add(map);
                             var loc = new InvLocation { name = (string.IsNullOrEmpty(map.name) ? (st.starName ?? st.starId) : map.name) + "（基地）", galaxyId = g.id };
                             AddThings(loc, new List<FWThingBean>(map.starSpread.things), snap);
                             snap.inventory.Add(loc);
@@ -1148,6 +1158,26 @@ namespace TradeHelper
                 }
             }
             catch (Exception e) { snap.errors.Add("读舰队背包失败: " + e.Message); }
+            // Goods on their way: transports (gd.expeditionSeq, each carrying its things; one bound for the mothership is
+            // unloaded only when the player opens the mothership map, AirShipLocalData.logicExpeditions) and freights
+            // waiting to land on a map (FWStarMapInfo.freightList). They are the player's all along.
+            try
+            {
+                var transit = new InvLocation { name = "运输中", galaxyId = snap.fleetGalaxyId };
+                var seq = gd.expeditionSeq;
+                if (seq != null)
+                    foreach (var ex in new List<FWExpedition>(seq))
+                        if (ex?.things != null && ex.things.Count > 0) AddThings(transit, new List<FWThingBean>(ex.things), snap);
+                foreach (var map in scannedMaps)
+                {
+                    var fl = map.freightList;
+                    if (fl == null) continue;
+                    foreach (var f in new List<FWFreight>(fl))
+                        if (f?.things != null && f.things.Count > 0) AddThings(transit, new List<FWThingBean>(f.things), snap);
+                }
+                if (transit.items.Count > 0) snap.inventory.Add(transit);
+            }
+            catch (Exception e) { snap.errors.Add("读运输中的货失败: " + e.Message); }
             try
             {
                 // Space station warehouses (things bought into "空间站仓库").

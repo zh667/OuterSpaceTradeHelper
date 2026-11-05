@@ -352,7 +352,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
             var keys = new HashSet<string>();
             foreach (var p in order) if (p.state != 2 && p.key != null) keys.Add(p.key);
             // A partly read inventory would look like a sale: change nothing.
-            if (snap.inventory.Count == 0 || snap.errors.Exists(e => e.StartsWith("读舰队背包失败") || e.StartsWith("读空间站仓库失败"))) return false;
+            if (snap.inventory.Count == 0 || snap.errors.Exists(e => e.StartsWith("读舰队背包失败") || e.StartsWith("读空间站仓库失败") || e.StartsWith("读母舰甲板失败") || e.StartsWith("读运输中的货失败"))) return false;
             // After loading a save (or starting the game) the holding is whatever that save has: take it as the new baseline.
             var game = MarketScanner.Game;
             if (!ReferenceEquals(game, baselineGame))
@@ -524,7 +524,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
         static void CheckHoldings(Snapshot snap, List<Plan> order)
         {
             foreach (var p in order) { p.missing = 0; p.stillHeld = 0; }
-            if (snap.inventory.Count == 0 || snap.errors.Exists(e => e.StartsWith("读舰队背包失败") || e.StartsWith("读空间站仓库失败"))) return;
+            if (snap.inventory.Count == 0 || snap.errors.Exists(e => e.StartsWith("读舰队背包失败") || e.StartsWith("读空间站仓库失败") || e.StartsWith("读母舰甲板失败") || e.StartsWith("读运输中的货失败"))) return;
             var keys = new HashSet<string>();
             foreach (var p in order) if (p.state == 1 && p.key != null) keys.Add(p.key);
             foreach (var key in keys)
