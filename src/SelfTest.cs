@@ -81,6 +81,26 @@ namespace TradeHelper
             yield return Shot("menu");
             Log("loading " + info.name);
             float tl = Time.realtimeSinceStartup;
+            // A save that used a mod not installed in the test copy makes the game ask whether to load it anyway
+            // (UserBean.loadArchive), which would stop the test: drop such entries from this in-memory copy only.
+            try
+            {
+                if (info.containsMods != null)
+                {
+                    var installed = new HashSet<string>();
+                    foreach (var dir in Directory.GetDirectories(Path.Combine(Path.GetDirectoryName(Application.dataPath), "mods")))
+                    {
+                        var mf = Path.Combine(dir, "Manifest", "manifest.xml");
+                        if (!File.Exists(mf)) continue;
+                        var mm = System.Text.RegularExpressions.Regex.Match(File.ReadAllText(mf), "<packageId>\\s*([^<\\s]+)\\s*</packageId>");
+                        if (mm.Success) installed.Add(mm.Groups[1].Value);
+                    }
+                    int before = info.containsMods.Count;
+                    info.containsMods.RemoveAll(m => m == null || !installed.Contains(m.Split('_')[0]));
+                    if (info.containsMods.Count != before) Log("save lists " + (before - info.containsMods.Count) + " mod(s) not installed in the test copy; ignored");
+                }
+            }
+            catch (Exception e) { Log("mod list check: " + e.Message); }
             UserBean.getInstance().loadArchive(info);
             while (MarketScanner.Game == null && Time.realtimeSinceStartup - tl < 300) yield return new WaitForSecondsRealtime(1);
             if (MarketScanner.Game == null) { yield return Shot("load-timeout"); Finish("the save did not load in 300 s"); yield break; }
@@ -148,6 +168,7 @@ namespace TradeHelper
 
             if (req.tests == "all" || req.tests.Contains("trade")) yield return Guard(TradeTest(), "real trade: buy, plan stages, sell");
             if (req.tests == "all" || req.tests.Contains("ledger")) yield return Guard(LedgerTest(), "checkout ledger: the game's own checkout");
+            if (req.tests == "all" || req.tests.Contains("ui")) yield return Guard(UiInputTest(), "ui: search boxes take clicks");
             yield return Guard(CatchUpSmoothness(false), "catch-up smoothness");
 
             // A full scan from scratch, then a refresh with nothing changed.
@@ -496,6 +517,17 @@ namespace TradeHelper
             bestOk &= detailOk;
             host.SetVisible(false);
 
+            // Marked done by hand before selling (what a player did): flagged while the goods are still in the inventory,
+            // and 改回已买入 brings it back.
+            Plans.MarkDone(plan, host.Cfg);
+            yield return Refresh();
+            bool heldFlag = plan.state == 2 && plan.stillHeld == k && plan.StateText == "③ 已完成？库存还有" && plan.note.Contains("改回已买入");
+            c.details.Add("marked done while still held: " + plan.StateText + " / " + plan.note + (heldFlag ? " ok" : " WRONG"));
+            Plans.Reopen(plan, host.Cfg, host.settlement);
+            yield return Refresh();
+            heldFlag &= plan.state == 1 && plan.stillHeld == 0 && plan.missing == 0;
+            c.details.Add("改回已买入: " + plan.StateText + (plan.state == 1 ? " ok" : " WRONG"));
+
             // A second plan of the same goods, earlier in the queue, selling at the same market, marked bought by hand
             // although nothing more was bought (what a player did): it must be shown as not in the inventory, must not
             // push the real plan down the market's queue, and the sale below must count for the real plan.
@@ -559,8 +591,70 @@ namespace TradeHelper
             var route = Plans.Routes().Find(r => r.name == qb.name && r.to == plan.sellName && !r.held);
             bool routeOk = route != null && route.count == 1 && route.units == k && SameMoney(route.profit, payS - idea.cost);
             c.details.Add("route summary: " + (route == null ? "missing" : route.count + " time(s), " + route.units + " units, profit " + route.profit.ToString("0") + " (expected " + (payS - idea.cost).ToString("0") + ")") + (routeOk ? " ok" : " WRONG"));
-            c.passed = buyOk && stage2 && bestOk && decoyFlag && unbought && sellOk && stage3 && decoyKept && creditsOk && routeOk;
+            c.passed = buyOk && stage2 && bestOk && heldFlag && decoyFlag && unbought && sellOk && stage3 && decoyKept && creditsOk && routeOk;
             c.summary = (c.passed ? "all steps match" : "some steps differ") + " (" + qb.name + " " + qb.market.name + " -> " + qs.market.name + ")";
+        }
+
+        // Every search box of the panel, clicked the way the game's event system would: the top raycast hit at its centre
+        // must be the box, and a pointer click there must focus it. Also notes the event system and cursor state.
+        IEnumerator UiInputTest()
+        {
+            var c = new Check { name = "ui: search boxes take clicks" };
+            result.checks.Add(c);
+            host.SetVisible(true);
+            bool ok = true; int boxes = 0;
+            var es = UnityEngine.EventSystems.EventSystem.current;
+            c.details.Add("event system: " + (es == null ? "none" : es.name + " enabled=" + es.enabled + " module=" + (es.currentInputModule != null ? es.currentInputModule.GetType().Name + " enabled=" + es.currentInputModule.enabled : "none"))
+                          + "; cursor visible=" + Cursor.visible + " lock=" + Cursor.lockState);
+            // Once on its own, once over the game's open trade page (whose own widgets might take the focus back).
+            PageTradeInventory gamePage = null;
+            foreach (int pass in new[] { 0, 1 })
+            foreach (int tab in new[] { 0, 2, 3 })
+            {
+                if (pass == 1 && gamePage == null)
+                {
+                    var mk = host.Latest?.markets.Find(m => m.Exact && !m.planet && m.Explored);
+                    if (mk == null) { c.details.Add("no up-to-date market to open the game's trade page"); ok = false; break; }
+                    Locked(() => { ExchangeTransferHandler h0; ExchangeInventoryContext x0; FleetInventoryContext f0; gamePage = OpenTradePage(mk.ex, out h0, out x0, out f0); });
+                    yield return new WaitForSecondsRealtime(1f);
+                    host.SetVisible(true);
+                }
+                host.ShowTab(tab);
+                yield return new WaitForSecondsRealtime(1f);
+                var cv = host.CanvasGo;
+                if (cv == null || es == null) { ok = false; break; }
+                foreach (var inp in cv.GetComponentsInChildren<TMPro.TMP_InputField>(false))
+                {
+                    boxes++;
+                    var corners = new Vector3[4];
+                    ((RectTransform)inp.transform).GetWorldCorners(corners);
+                    var ped = new UnityEngine.EventSystems.PointerEventData(es) { position = (corners[0] + corners[2]) / 2, button = UnityEngine.EventSystems.PointerEventData.InputButton.Left };
+                    var hits = new List<UnityEngine.EventSystems.RaycastResult>();
+                    es.RaycastAll(ped, hits);
+                    string top = string.Join(" > ", hits.Take(3).Select(h => h.gameObject.name + "@" + (h.module != null ? h.module.name : "?")));
+                    bool onTop = hits.Count > 0 && hits[0].gameObject.transform.IsChildOf(inp.transform);
+                    if (hits.Count > 0)
+                    {
+                        ped.pointerPressRaycast = hits[0]; ped.pointerCurrentRaycast = hits[0];
+                        var target = UnityEngine.EventSystems.ExecuteEvents.GetEventHandler<UnityEngine.EventSystems.IPointerClickHandler>(hits[0].gameObject) ?? hits[0].gameObject;
+                        UnityEngine.EventSystems.ExecuteEvents.Execute(target, ped, UnityEngine.EventSystems.ExecuteEvents.pointerDownHandler);
+                        UnityEngine.EventSystems.ExecuteEvents.Execute(target, ped, UnityEngine.EventSystems.ExecuteEvents.pointerUpHandler);
+                        UnityEngine.EventSystems.ExecuteEvents.Execute(target, ped, UnityEngine.EventSystems.ExecuteEvents.pointerClickHandler);
+                    }
+                    yield return new WaitForSecondsRealtime(0.5f);
+                    bool focused = inp.isFocused;
+                    c.details.Add((pass == 1 ? "over the game's trade page, " : "") + "tab " + tab + " box '" + (inp.placeholder is TMPro.TMP_Text ph ? ph.text : inp.name) + "': top hits " + top + (onTop ? "" : " (NOT the box)") + ", still focused 0.5 s after the click " + focused);
+                    ok &= onTop && focused;
+                    inp.DeactivateInputField();
+                    es.SetSelectedGameObject(null);
+                    yield return null;
+                }
+            }
+            yield return Shot("ui");
+            host.SetVisible(false);
+            if (gamePage != null) Locked(() => gamePage.RequestClose());
+            c.passed = ok && boxes > 0;
+            c.summary = boxes + " search boxes; " + (c.passed ? "all take clicks" : "some do not take clicks");
         }
 
         // Opens the game's trade page for a market the way PageInGalaxySpace.openExchangePage does.
@@ -686,6 +780,17 @@ namespace TradeHelper
             bool doneOk = plan.state == 2 && plan.actualPaid && Math.Abs(plan.soldRevenue - specialGot) < 0.01 && plan.doneNote != null && plan.doneNote.Contains(qs.market.name) && plan.doneNote.Contains("结账记录");
             c.details.Add("plan after selling: " + plan.StateText + ", revenue " + plan.soldRevenue.ToString("0.0") + ", profit " + plan.CurProfit.ToString("0.0") + " / " + plan.doneNote + (doneOk ? " ok" : " WRONG"));
             ok &= doneOk;
+            // A completed plan has nothing left to price: its detail shows no "?" and no best markets.
+            host.SetVisible(true);
+            host.ShowTab(1);
+            yield return new WaitForSecondsRealtime(1);
+            Ui.PlansView.Current?.Select(plan);
+            yield return null;
+            string shown = Ui.PlansView.Current != null ? System.Text.RegularExpressions.Regex.Replace(Ui.PlansView.Current.DetailText, "<[^>]+>", "") : "";
+            bool detailOk = shown.Length > 0 && !shown.Contains("?") && !shown.Contains("现在卖") && shown.Contains("到手按结账记录");
+            c.details.Add("completed plan detail: " + shown.Replace("\n", " / ") + (detailOk ? " ok" : " WRONG"));
+            ok &= detailOk;
+            host.SetVisible(false);
 
             // 3) A credit change in the checkout frame (something else paying out at the same moment) must not pass as exact.
             n0 = Ledger.entries.Count; cp0 = gd.creditPoint;

@@ -234,6 +234,7 @@ namespace TradeHelper.Ui
             input.caretColor = Theme.Accent;
             input.customCaretColor = true;
             input.selectionColor = new Color(Theme.Accent.r, Theme.Accent.g, Theme.Accent.b, 0.35f);
+            InputProbe.Watch(input, placeholder);
             if (changed != null) input.onValueChanged.AddListener(s => { try { changed(s); } catch (Exception e) { Debug.LogWarning("[TradeHelper] input: " + e); } });
             return input;
         }

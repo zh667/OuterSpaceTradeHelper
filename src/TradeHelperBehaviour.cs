@@ -8,7 +8,7 @@ namespace TradeHelper
 {
     public class TradeHelperBehaviour : MonoBehaviour
     {
-        public const string Version = "0.4.8";
+        public const string Version = "0.4.9";
         public static TradeHelperBehaviour Instance;
 
         Config cfg;
@@ -35,6 +35,8 @@ namespace TradeHelper
             settlement.MarketFinished += _ => refreshAfterSettlement = true;
             if (SelfTest.Requested()) gameObject.AddComponent<SelfTest>();
         }
+
+        public GameObject CanvasGo => window != null ? window.canvasGo : null;
 
         public void SetVisible(bool on)
         {
@@ -258,6 +260,7 @@ namespace TradeHelper
                     if (cfg.autoRefreshSeconds > 0 && Time.unscaledTime >= nextAutoRefresh) RequestRefresh(false);
                     window.Tick();
                     UpdateStatus();
+                    Ui.InputProbe.Tick(CanvasGo);
                     Perf.Add(Perf.Cat.Ui, tu);
                 }
                 if (cfg.exportEverySeconds > 0 && Time.unscaledTime >= nextExport)
@@ -293,7 +296,13 @@ namespace TradeHelper
         void OnGUI()
         {
             long t = Perf.Now;
-            try { HotkeyCheck(); } finally { Perf.Add(Perf.Cat.Gui, t); }
+            try
+            {
+                HotkeyCheck();
+                if (Visible) Ui.InputProbe.OnGui(CanvasGo);
+            }
+            catch (Exception e) { Debug.LogWarning("[TradeHelper] gui: " + e.Message); }
+            finally { Perf.Add(Perf.Cat.Gui, t); }
         }
 
         void HotkeyCheck()

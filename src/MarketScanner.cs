@@ -1076,13 +1076,13 @@ namespace TradeHelper
                 var fleet = gd.galaxyBlock?.playerFleet;
                 if (fleet != null)
                 {
-                    var loc = new InvLocation { name = (string.IsNullOrEmpty(fleet.name) ? "舰队" : fleet.name) + "（舰队货仓）", galaxyId = fleet.pos?.galaxyId };
+                    var loc = new InvLocation { name = (string.IsNullOrEmpty(fleet.name) ? "舰队" : fleet.name) + "（舰队背包）", galaxyId = fleet.pos?.galaxyId };
                     var things = fleet.getThings();
                     if (things != null) AddThings(loc, new List<FWThingBean>(things), snap);
                     snap.inventory.Add(loc);
                 }
             }
-            catch (Exception e) { snap.errors.Add("读舰队货仓失败: " + e.Message); }
+            catch (Exception e) { snap.errors.Add("读舰队背包失败: " + e.Message); }
             try
             {
                 // Space station warehouses (things bought into "空间站仓库").

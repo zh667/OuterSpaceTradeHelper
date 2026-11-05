@@ -117,10 +117,19 @@ def install_mod(no_build):
         print(r.stdout[-1500:])
         if r.returncode:
             sys.exit("build failed")
-    dst = RUNTIME / "mods" / "TradeHelper"
-    if dst.exists():
-        shutil.rmtree(dst)
-    shutil.copytree(ROOT / "dist" / "TradeHelper", dst)
+    mods = RUNTIME / "mods"
+    if mods.exists():
+        shutil.rmtree(mods)
+    mods.mkdir()
+    # The player's other installed mods (code and manifest; their data stays with the player): a save that used them
+    # loads without the game's "missing mod" question, which would stop the test.
+    for other in (GAME / "mods").iterdir() if (GAME / "mods").exists() else []:
+        if other.is_dir() and other.name != "TradeHelper":
+            for part in ("Manifest", "v_common"):
+                if (other / part).exists():
+                    shutil.copytree(other / part, mods / other.name / part)
+    shutil.copytree(ROOT / "dist" / "TradeHelper", mods / "TradeHelper")
+    print("mods in the test copy:", sorted(p.name for p in mods.iterdir()))
 
 
 def main():

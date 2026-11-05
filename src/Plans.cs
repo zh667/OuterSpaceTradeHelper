@@ -33,7 +33,7 @@ namespace TradeHelper
         public bool keepFresh = true;
         public List<long> addedKeepFresh = new List<long>();
         public List<PlanPoint> history = new List<PlanPoint>();
-        public string fromLocation;             // plans from held stock: where the stock is (e.g. 灾厄舰队（舰队货仓）)
+        public string fromLocation;             // plans from held stock: where the stock is (e.g. 灾厄舰队（舰队背包）)
         public bool autoBought;                 // the purchase was seen in the inventory (not marked by hand)
         public string boughtAt;
         public long boughtMM = -1;              // game clock when the goods were in hand (sales after it count)
@@ -60,6 +60,8 @@ namespace TradeHelper
         // Units this plan counts as in hand that the inventory does not have (the open plans of this goods together claim
         // more than the player holds, e.g. a plan marked bought by hand before buying).
         [JsonIgnore] [NonSerialized] public int missing;
+        // Completed by hand while the inventory still holds this many units that no open plan accounts for.
+        [JsonIgnore] [NonSerialized] public int stillHeld;
         [JsonIgnore] [NonSerialized] public DateTime lastPointAt = DateTime.MinValue;
 
         [JsonIgnore] public double PlanProfit => planRevenue - planCost;
@@ -82,7 +84,7 @@ namespace TradeHelper
         [JsonIgnore] public string StateText => state == 1 && missing > 0 ? (missing >= HoldQty ? "② 库存里没有" : "② 库存缺 " + missing)
                                               : state == 0 ? "① 待买入"
                                               : state == 1 ? (soldQty > 0 ? "② 已卖 " + soldQty + "/" + boughtQty : "② 已买 " + boughtQty + "，待卖")
-                                              : (autoDone ? "③ 已完成·自动" : "③ 已完成");
+                                              : (autoDone ? "③ 已完成·自动" : stillHeld > 0 ? "③ 已完成？库存还有" : "③ 已完成");
     }
 
     // plans.json. Written with the game's Newtonsoft.Json: Unity's JsonUtility silently wrote "{}" for this file (0.3.0 and
@@ -350,7 +352,7 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
             var keys = new HashSet<string>();
             foreach (var p in order) if (p.state != 2 && p.key != null) keys.Add(p.key);
             // A partly read inventory would look like a sale: change nothing.
-            if (snap.inventory.Count == 0 || snap.errors.Exists(e => e.StartsWith("读舰队货仓失败") || e.StartsWith("读空间站仓库失败"))) return false;
+            if (snap.inventory.Count == 0 || snap.errors.Exists(e => e.StartsWith("读舰队背包失败") || e.StartsWith("读空间站仓库失败"))) return false;
             // After loading a save (or starting the game) the holding is whatever that save has: take it as the new baseline.
             var game = MarketScanner.Game;
             if (!ReferenceEquals(game, baselineGame))
@@ -491,8 +493,8 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
         // bought by hand first (the usual cause), then on the newest.
         static void CheckHoldings(Snapshot snap, List<Plan> order)
         {
-            foreach (var p in order) p.missing = 0;
-            if (snap.inventory.Count == 0 || snap.errors.Exists(e => e.StartsWith("读舰队货仓失败") || e.StartsWith("读空间站仓库失败"))) return;
+            foreach (var p in order) { p.missing = 0; p.stillHeld = 0; }
+            if (snap.inventory.Count == 0 || snap.errors.Exists(e => e.StartsWith("读舰队背包失败") || e.StartsWith("读空间站仓库失败"))) return;
             var keys = new HashSet<string>();
             foreach (var p in order) if (p.state == 1 && p.key != null) keys.Add(p.key);
             foreach (var key in keys)
@@ -510,6 +512,22 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
                     p.missing = Math.Min(excess, p.HoldQty);
                     excess -= p.missing;
                 }
+            }
+            // Plans completed by hand whose goods are still in the inventory, beyond what open plans account for (the
+            // newest such plan first): probably marked done before selling.
+            var done = order.FindAll(p => p.state == 2 && !p.autoDone && p.key != null && p.boughtQty > 0);
+            done.Reverse();
+            var spare = new Dictionary<string, int>();
+            foreach (var p in done)
+            {
+                int free;
+                if (!spare.TryGetValue(p.key, out free))
+                {
+                    free = snap.Owned(p.key);
+                    foreach (var o in order) if (o.key == p.key && o.state == 1) free -= o.HoldQty - o.missing;
+                }
+                if (free >= p.boughtQty) { p.stillHeld = p.boughtQty; free -= p.boughtQty; }
+                spare[p.key] = free;
             }
         }
 
@@ -591,6 +609,8 @@ buyName = "（持有·" + s.location + "）", fromLocation = s.location, created
             foreach (var p in order)
             {
                 p.note = "";
+                if (p.stillHeld > 0)
+                    p.note = "库存里还有 " + p.stillHeld + " 个" + p.name + "，像是还没卖就点了「改为已完成」。还没卖的话点「改回已买入」，卖掉后会自动完成并写明卖在哪。";
                 if (p.missing > 0)
                 {
                     int owned = snap.Owned(p.key), claimed = 0;
