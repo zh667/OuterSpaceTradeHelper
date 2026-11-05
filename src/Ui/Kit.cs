@@ -350,6 +350,31 @@ namespace TradeHelper.Ui
         }
     }
 
+    // One of the panel's resize zones (edges = which sides it moves). See Window.AddResizeHandles.
+    public class ResizeHandle : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler, IBeginDragHandler, IDragHandler, IEndDragHandler
+    {
+        public const int Left = 1, Right = 2, Bottom = 4, Top = 8;
+        public static readonly Color Idle = new Color(0, 0, 0, 0);
+        public int edges;
+        public Window window;
+        bool dragging;
+        Image img;
+
+        Image Img => img != null ? img : (img = GetComponent<Image>());
+        static Color Hover => new Color(Theme.Accent.r, Theme.Accent.g, Theme.Accent.b, 0.55f);
+
+        public void OnPointerEnter(PointerEventData e) { if (Img != null) Img.color = Hover; }
+        public void OnPointerExit(PointerEventData e) { if (Img != null && !dragging) Img.color = Idle; }
+        public void OnBeginDrag(PointerEventData e) { dragging = true; window?.BeginResize(e.position); }
+        public void OnDrag(PointerEventData e) { window?.DragResize(edges, e.position); }
+        public void OnEndDrag(PointerEventData e)
+        {
+            dragging = false;
+            if (Img != null) Img.color = Idle;
+            window?.EndResize();
+        }
+    }
+
     public class DragHandle : MonoBehaviour, IDragHandler
     {
         public RectTransform target;

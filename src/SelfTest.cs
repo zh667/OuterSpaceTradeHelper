@@ -192,6 +192,7 @@ namespace TradeHelper
                 host.SetVisible(false);
             }
             if (req.tests == "all" || req.tests.Contains("ui")) yield return Guard(UiInputTest(), "ui: search boxes take clicks");
+            if (req.tests == "all" || req.tests.Contains("ui") || req.tests.Contains("resize")) yield return Guard(ResizeTest(), "panel resize");
             yield return Guard(CatchUpSmoothness(false), "catch-up smoothness");
 
             // A full scan from scratch, then a refresh with nothing changed.
@@ -805,6 +806,84 @@ namespace TradeHelper
             ok &= done;
             c.passed = ok;
             c.summary = (ok ? "matches the advice and the credits" : "some steps differ") + " (" + qb.name + " " + qb.market.name + " -> " + qs.market.name + ")";
+        }
+
+        // Drags the panel's corner and edge the way the event system does (begin/drag/end on the handle), and picks a size
+        // preset: the panel is built again at the new size, keeps its tab and data, and the plans table fits.
+        IEnumerator ResizeTest()
+        {
+            var c = new Check { name = "panel resize" };
+            result.checks.Add(c);
+            host.SetVisible(true);
+            host.ShowTab(1);
+            yield return new WaitForSecondsRealtime(1f);
+            var win = host.Win;
+            bool ok = win != null;
+            int rows0 = Ui.PlansView.Current?.TableForTest?.RowCount ?? -1;
+            float scale = host.CanvasGo != null ? host.CanvasGo.GetComponent<Canvas>().scaleFactor : 1f;
+
+            Func<string, Ui.ResizeHandle> handle = name =>
+            {
+                foreach (var h in host.CanvasGo.GetComponentsInChildren<Ui.ResizeHandle>(true)) if (h.name == name) return h;
+                return null;
+            };
+            // 1) bottom-right corner: 150 narrower, 80 shorter.
+            float w0 = win.W, h0 = win.H;
+            var br = handle("ResizeBR");
+            if (br == null) { c.passed = false; c.summary = "no resize handles"; host.SetVisible(false); yield break; }
+            var es = UnityEngine.EventSystems.EventSystem.current;
+            var p0 = new Vector2(1000, 400);
+            br.OnBeginDrag(new UnityEngine.EventSystems.PointerEventData(es) { position = p0 });
+            br.OnDrag(new UnityEngine.EventSystems.PointerEventData(es) { position = p0 + new Vector2(-150, 80) * scale });
+            br.OnEndDrag(new UnityEngine.EventSystems.PointerEventData(es) { position = p0 + new Vector2(-150, 80) * scale });
+            yield return new WaitForSecondsRealtime(1f);
+            var t = Ui.PlansView.Current?.TableForTest;
+            bool corner = Mathf.Abs(win.W - (w0 - 150)) < 1.5f && Mathf.Abs(win.H - (h0 - 80)) < 1.5f && t != null && t.ColumnsWidth <= t.Width - 19 && t.RowCount == rows0;
+            c.details.Add("corner drag: " + w0 + "x" + h0 + " -> " + win.W + "x" + win.H + ", plans table columns " + (t?.ColumnsWidth ?? -1) + " in " + (t?.Width ?? -1) + ", rows " + (t?.RowCount ?? -1) + "/" + rows0 + (corner ? " ok" : " WRONG"));
+            yield return Shot("resize-small");
+            ok &= corner;
+
+            // 2) left edge: 50 narrower, right edge stays where it was.
+            float w1 = win.W;
+            var lh = handle("ResizeL");
+            var rt = (RectTransform)host.CanvasGo.transform.Find("Window");
+            float right1 = rt.anchoredPosition.x + w1 / 2;
+            lh.OnBeginDrag(new UnityEngine.EventSystems.PointerEventData(es) { position = p0 });
+            lh.OnDrag(new UnityEngine.EventSystems.PointerEventData(es) { position = p0 + new Vector2(50, 0) * scale });
+            lh.OnEndDrag(new UnityEngine.EventSystems.PointerEventData(es) { position = p0 + new Vector2(50, 0) * scale });
+            yield return new WaitForSecondsRealtime(1f);
+            rt = (RectTransform)host.CanvasGo.transform.Find("Window");
+            float right2 = rt.anchoredPosition.x + win.W / 2;
+            bool edge = Mathf.Abs(win.W - (w1 - 50)) < 1.5f && Mathf.Abs(right2 - right1) < 1.5f;
+            c.details.Add("left edge drag: width " + w1 + " -> " + win.W + ", right side " + right1.ToString("0") + " -> " + right2.ToString("0") + (edge ? " ok" : " WRONG"));
+            ok &= edge;
+
+            // 3) can't go under the minimum.
+            var bh = handle("ResizeB");
+            bh.OnBeginDrag(new UnityEngine.EventSystems.PointerEventData(es) { position = p0 });
+            bh.OnDrag(new UnityEngine.EventSystems.PointerEventData(es) { position = p0 + new Vector2(0, 2000) * scale });
+            bh.OnEndDrag(new UnityEngine.EventSystems.PointerEventData(es) { position = p0 + new Vector2(0, 2000) * scale });
+            yield return new WaitForSecondsRealtime(1f);
+            bool min = Mathf.Abs(win.H - Ui.Window.MinH) < 1.5f;
+            c.details.Add("bottom edge dragged far up: height " + win.H + " (minimum " + Ui.Window.MinH + ")" + (min ? " ok" : " WRONG"));
+            ok &= min;
+
+            // 4) the large preset from the settings page.
+            win.ApplySize(1800, 1000);
+            yield return new WaitForSecondsRealtime(1f);
+            host.ShowTab(1);
+            yield return new WaitForSecondsRealtime(0.5f);
+            t = Ui.PlansView.Current?.TableForTest;
+            bool big = Mathf.Abs(win.W - 1800) < 1.5f && Mathf.Abs(win.H - 1000) < 1.5f && t != null && t.ColumnsWidth <= t.Width - 19 && t.ColumnsWidth > 1600;
+            c.details.Add("preset 1800x1000: " + win.W + "x" + win.H + ", plans table columns " + (t?.ColumnsWidth ?? -1) + " in " + (t?.Width ?? -1) + (big ? " ok" : " WRONG"));
+            yield return Shot("resize-large");
+            ok &= big;
+
+            win.ApplySize(Ui.Window.DefaultW, Ui.Window.DefaultH);
+            yield return new WaitForSecondsRealtime(1f);
+            host.SetVisible(false);
+            c.passed = ok;
+            c.summary = ok ? "corner, edge, minimum and preset all resize and rebuild correctly" : "some resize steps differ";
         }
 
         // Every search box of the panel, clicked the way the game's event system would: the top raycast hit at its centre

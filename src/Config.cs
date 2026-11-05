@@ -34,6 +34,9 @@ namespace TradeHelper
         public bool includeUndiscovered = false;
         // Planet ground markets (地面交易行) in route advice. Off: the fleet cannot trade there.
         public bool includeGround = false;
+        // Panel size (canvas units at 1920x1080 reference) and whether its edges can be dragged.
+        public float panelW = 1560f, panelH = 860f;
+        public bool panelResizable = true;
         // 0 = always AU with thousands separators; 1 = like the game's route panels (AU, or ly above one light year).
         public int distanceUnit = 0;
 

@@ -452,6 +452,16 @@ namespace TradeHelper.Ui
             hk.text = cfg.hotkey;
             Kit.Button(root, "保存", 518, y, 80, 30, () => { if (!string.IsNullOrEmpty(hk.text)) { cfg.hotkey = hk.text.Trim(); cfg.Save(); } });
             y += 42;
+            // Panel size: presets here, or drag the panel's edges and corners.
+            var max = Window.MaxSize();
+            var sizes = new List<Vector2> { new Vector2(Window.DefaultW, Window.DefaultH), new Vector2(Window.MinW, 720), new Vector2(1800, 900), new Vector2(1800, 1000), max };
+            var names = new List<string> { "默认 1560×860", "紧凑 1360×720", "宽 1800×900", "大 1800×1000", "铺满屏幕" };
+            int cur = sizes.FindIndex(v => Mathf.Abs(v.x - w.W) < 2 && Mathf.Abs(v.y - w.H) < 2);
+            if (cur < 0) { names.Add("自定义 " + Mathf.Round(w.W) + "×" + Mathf.Round(w.H)); sizes.Add(new Vector2(w.W, w.H)); cur = names.Count - 1; }
+            Drop("面板大小：", 0, y, 420, names, cur, i => w.ApplySize(sizes[i].x, sizes[i].y));
+            Kit.Toggle(root, "允许拖动四边和四角调整大小", 430, y + 1, 300, cfg.panelResizable, v => { cfg.panelResizable = v; cfg.Save(); w.RequestRebuild(); });
+            Kit.TxtAt(root, "鼠标移到面板边缘或角上会亮起，按住拖动；松开后按新大小重排。", 740, y, Mathf.Max(200, w.BodyW - 740), 30, 14, Theme.Text2);
+            y += 42;
             Kit.TxtAt(root, "后台补算：和你打开空间站交易所一样，交给游戏自己的后台线程算，一次一个站，不占游戏主画面的帧。", 0, y, 900, 30, 15, Theme.Text2);
             y += 42;
             int ri = Array.IndexOf(RefreshOpts, cfg.autoRefreshSeconds);
@@ -632,6 +642,7 @@ namespace TradeHelper.Ui
         public static PlansView Current;
         public void Select(Plan p) { selected = p; Refresh(); }
         public string DetailText => detail.text;
+        public Table<Plan> TableForTest => table;
 
         // Totals over completed plans: trade plans (bought, then sold) and plans that sold stock already held are kept
         // apart, since the latter have no purchase cost.

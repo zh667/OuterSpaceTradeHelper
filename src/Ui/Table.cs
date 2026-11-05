@@ -62,6 +62,7 @@ namespace TradeHelper.Ui
         {
             columns = cols;
             this.sortCol = sortCol; this.desc = desc;
+            FitColumns(cols, w);
             root = Kit.Place(Kit.New("Table", parent), x, y, w, h);
             var head = Kit.Place(Kit.New("Head", root), 0, 0, w, HeadH);
             Kit.Img(head, Theme.White, Theme.HeadBg);
@@ -127,6 +128,32 @@ namespace TradeHelper.Ui
             empty = Kit.TxtAt(viewport, emptyText, 0, 20, w, 30, 16, Theme.Text2, TextAlignmentOptions.Center);
             UpdateHeaders();
         }
+
+        // Column widths are designed for the default panel. In a wider panel the text columns (names, stations) take
+        // the extra room; in a narrower one every column shrinks in proportion (not under 70%).
+        static void FitColumns(List<Column<T>> cols, float w)
+        {
+            float avail = w - 20, sum = 0, flex = 0;   // 8 left inset + 12 scrollbar
+            foreach (var c in cols) { sum += c.width; if (IsFlex(c)) flex += c.width; }
+            if (sum <= 0 || Mathf.Abs(avail - sum) < 2) return;
+            if (avail < sum)
+            {
+                float f = Mathf.Max(0.7f, avail / sum);
+                foreach (var c in cols) c.width = Mathf.Floor(c.width * f);
+            }
+            else if (flex > 0)
+            {
+                float extra = avail - sum;
+                foreach (var c in cols) if (IsFlex(c)) c.width += Mathf.Floor(extra * c.width / flex);
+            }
+        }
+
+        // For the self-test: the columns' total width and the room they have.
+        public float ColumnsWidth { get { float s = 0; foreach (var c in columns) s += c.width; return s; } }
+        public float Width => root.rect.width;
+        public int RowCount => view.Count;
+
+        static bool IsFlex(Column<T> c) => c.buttonText == null && c.checkGet == null && !c.numeric && !string.IsNullOrEmpty(c.title);
 
         RowUi MakeRow(float w)
         {
