@@ -588,7 +588,7 @@ namespace TradeHelper.Ui
 
         public PlansView(Window w, RectTransform body, Config cfg, TradeHelperBehaviour host) : base(w, body, cfg, host)
         {
-            Kit.TxtAt(root, "状态自动改：库存多出这批货 → ② 已买；全部没了 → ③ 已完成（写明卖在哪）。「手动改状态」可纠正。* = 同站同货排队压价。“—”= 不适用（已卖完或库存里没有）；“?”= 暂时算不出，点这一行看原因", 0, 0, w.BodyW, 24, 14, Theme.Text2);
+            Kit.TxtAt(root, "状态自动改：库存多出这批货 → ② 已买；全部没了 → ③ 已完成（写明卖在哪）。「手动改状态」可纠正。成本：待买=现在买要花，已买=实际花的（灰色=计划时的估计）。* = 同站同货排队压价；“—”= 不适用；“?”= 暂时算不出", 0, 0, w.BodyW, 24, 14, Theme.Text2);
             Drop("显示：", 0, 30, 230, new List<string> { "进行中", "全部", "已完成" }, 0, i => { show = i; table.Resort(); });
             Kit.Button(root, "删除所有已完成", 238, 30, 230, 32, () =>
             {
@@ -603,6 +603,11 @@ namespace TradeHelper.Ui
                 new Column<Plan> { title = "状态", width = 144, text = p => p.StateText, key = p => p.state, numeric = true, color = p => (p.state == 1 && p.missing > 0) || p.stillHeld > 0 ? Theme.Bad : p.state == 0 ? Theme.Accent : p.state == 1 ? Theme.Good : Theme.Text2 },
                 new Column<Plan> { title = "在哪买", width = 176, text = p => Station(p.buyName, p.buyMarket), key = p => p.buyName, color = p => p.buyMarket != null ? Fmt.FreshColor(p.buyMarket) : Theme.Text2 },
                 new Column<Plan> { title = "去哪卖", width = 176, text = p => Station(p.sellName, p.sellMarket), key = p => p.sellName, color = p => p.sellMarket != null ? Fmt.FreshColor(p.sellMarket) : Theme.Text2 },
+                // Cost: still to buy = what buying now costs; bought = what was paid (the checkout ledger's amount when every
+                // unit was seen, else the planned cost); held stock costs nothing.
+                new Column<Plan> { title = "成本", width = 90, text = p => p.buyUid < 0 ? "—" : p.state == 0 ? (double.IsNaN(p.curCost) ? "?" : Fmt.Money(p.curCost)) : Fmt.Money(p.Cost),
+                    key = p => p.buyUid < 0 ? (IComparable)null : p.state == 0 ? (double.IsNaN(p.curCost) ? (IComparable)null : p.curCost) : p.Cost, numeric = true, align = TextAlignmentOptions.MidlineRight,
+                    color = p => p.state != 0 && p.buyUid >= 0 && !p.CostKnown ? Theme.Text2 : Theme.Text },
                 new Column<Plan> { title = "计划净赚", width = 90, text = p => Fmt.Money(p.PlanProfit), key = p => p.PlanProfit, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<Plan> { title = "现在净赚", width = 90, text = p => NotApplicable(p) && p.state == 1 ? "—" : double.IsNaN(p.CurProfit) ? "?" : Fmt.Money(p.CurProfit) + (p.sellAhead > 0 || p.buyAhead > 0 ? "*" : ""), key = p => double.IsNaN(p.CurProfit) ? (IComparable)null : p.CurProfit, numeric = true, align = TextAlignmentOptions.MidlineRight, color = ChangeColor },
                 new Column<Plan> { title = "变化", width = 62, text = p => NotApplicable(p) && p.state == 1 ? "—" : Change(p), key = p => double.IsNaN(p.CurProfit) ? (IComparable)null : p.CurProfit - p.PlanProfit, numeric = true, align = TextAlignmentOptions.MidlineRight, color = ChangeColor },
