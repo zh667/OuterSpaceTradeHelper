@@ -163,11 +163,13 @@ namespace TradeHelper
             Run(() => CheckSpecialSellModel(snap));
             Run(() => CheckAdvice(snap));
             Run(() => CheckExploration(snap));
+            Run(() => CheckShips(snap));
             Run(() => ProbeCalls(snap));
             Run(() => StationPlaces());
 
             if (req.tests == "all" || req.tests.Contains("trade")) yield return Guard(TradeTest(), "real trade: buy, plan stages, sell");
             if (req.tests == "all" || req.tests.Contains("ledger")) yield return Guard(LedgerTest(), "checkout ledger: the game's own checkout");
+            if (req.tests == "all" || req.tests.Contains("ship")) yield return Guard(ShipTest(), "ship trade: the game's own checkout");
             if (req.tests == "all" || req.tests.Contains("ui")) yield return Guard(UiInputTest(), "ui: search boxes take clicks");
             yield return Guard(CatchUpSmoothness(false), "catch-up smoothness");
 
@@ -595,6 +597,146 @@ namespace TradeHelper
             c.summary = (c.passed ? "all steps match" : "some steps differ") + " (" + qb.name + " " + qb.market.name + " -> " + qs.market.name + ")";
         }
 
+        // Ships: every ship in an up-to-date store priced by the mod as the trade page prices it (one ship at a time,
+        // FWExchangeSpace.getSpecialGoodsPriceToSell), buying and reselling elsewhere, and the player's own ships.
+        Check CheckShips(Snapshot snap)
+        {
+            var c = new Check { name = "ship prices = trade page" };
+            int n = 0, bad = 0, markets = 0, withDefects = 0; double worst = 0;
+            var byGid = new Dictionary<string, List<GoodsQuote>>();
+            foreach (var m in snap.markets)
+            {
+                if (!m.Exact) continue;
+                foreach (var q in m.goods)
+                {
+                    if (!q.ship || q.specialGoods == null || EventChanged(q)) continue;
+                    List<GoodsQuote> l;
+                    if (!byGid.TryGetValue(q.gid, out l)) byGid[q.gid] = l = new List<GoodsQuote>();
+                    l.Add(q);
+                    if (q.storeShips == null || q.storeShips.Count == 0) continue;
+                    markets++;
+                    double sum = 0;
+                    for (int i = 0; i < q.storeShips.Count; i++)
+                    {
+                        if (q.shipDefects[i] > 0) withDefects++;
+                        double game = m.ex.getSpecialGoodsPriceToSell(q.storeShips[i]);
+                        double mod = q.BuyUnit(i); n++;
+                        sum += game;
+                        double r = Rel(mod, game); if (r > worst) worst = r;
+                        if (r > 1e-3) { bad++; if (c.details.Count < 12) c.details.Add(m.name + " / " + q.name + " #" + i + " (" + q.shipDefects[i] + " defects): mod " + mod.ToString("0") + " game " + game.ToString("0")); }
+                        if (i < 5)
+                        {
+                            double cost = q.BuyCost(i + 1), gcost = sum * Math.Max(0.0, 1.0 + q.tax); n++;
+                            r = Rel(cost, gcost); if (r > worst) worst = r;
+                            if (r > 1e-3) { bad++; if (c.details.Count < 12) c.details.Add(m.name + " / " + q.name + " x" + (i + 1) + ": mod cost " + cost.ToString("0") + " page " + gcost.ToString("0")); }
+                        }
+                    }
+                }
+            }
+            foreach (var l in byGid.Values)
+                foreach (var b in l)
+                {
+                    if (b.storeShips == null || b.storeShips.Count == 0) continue;
+                    int k = Math.Min(5, b.storeShips.Count), used = 0;
+                    foreach (var s in l)
+                    {
+                        if (s == b || used >= 3) continue;
+                        used++;
+                        double game = 0;
+                        for (int i = 0; i < k; i++) game += s.market.ex.getSpecialGoodsPriceToSell(b.storeShips[i]);
+                        game *= Math.Max(0.0, 1.0 - s.tax);
+                        double mod = s.SellBoughtRevenue(0, b, 0, k); n++;
+                        double r = Rel(mod, game); if (r > worst) worst = r;
+                        if (r > 1e-3) { bad++; if (c.details.Count < 12) c.details.Add(b.market.name + " -> " + s.market.name + " / " + s.name + " x" + k + ": mod " + mod.ToString("0") + " page " + game.ToString("0")); }
+                    }
+                }
+            c.passed = n > 0 && bad == 0;
+            c.summary = markets + " ship lines in up-to-date stores (" + withDefects + " ships with defects), " + n + " quotes, " + bad + " off by more than 0.1%, worst " + (worst * 100).ToString("0.###") + "%";
+            return c;
+        }
+
+        // Buys one defect-free ship at one market and sells it at another through the game's own trade page and checkout,
+        // following a plan made from the advice's numbers.
+        IEnumerator ShipTest()
+        {
+            var c = new Check { name = "ship trade: the game's own checkout" };
+            result.checks.Add(c);
+            yield return Refresh();
+            var snap = host.Latest;
+            var gd = MarketScanner.Game;
+            GoodsQuote qb = null, qs = null;
+            foreach (var m in snap.markets)
+            {
+                if (qb != null) break;
+                if (!m.Exact || m.planet || !m.Explored) continue;
+                foreach (var q in m.goods)
+                {
+                    if (!q.ship || !q.buyable || q.contraband || q.shipDefects == null || q.shipDefects.Length == 0 || q.shipDefects[0] != 0) continue;
+                    foreach (var m2 in snap.markets)
+                    {
+                        GoodsQuote q2;
+                        if (m2 == m || !m2.Exact || m2.planet || !m2.Explored || !m2.byGid.TryGetValue(q.gid, out q2) || q2.contraband) continue;
+                        qb = q; qs = q2; break;
+                    }
+                    if (qb != null) break;
+                }
+            }
+            if (qb == null || DoCheckout == null) { c.passed = false; c.summary = qb == null ? "no defect-free ship with two up-to-date markets" : "DoCheckout not found"; yield break; }
+            var idea = new TradeIdea { gid = qb.gid, name = qb.name, category = qb.category, buy = qb, sell = qs, qty = 1, cost = qb.BuyCost(1), revenue = qs.SellBoughtRevenue(0, qb, 0, 1) };
+            Plan plan = null;
+            Locked(() => plan = Plans.FromTrade(idea, snap, host.Cfg, host.settlement));
+            yield return Refresh();
+            bool ok = true;
+            long target = qb.storeShips[0].uid;
+            var before = new HashSet<long>();
+            Locked(() => { foreach (var s in gd.galaxyBlock.playerFleet.ships) if (s != null) before.Add(s.getUID()); });
+
+            int n0 = Ledger.entries.Count; long cp0 = gd.creditPoint; int put = 0;
+            PageTradeInventory page = null; ExchangeTransferHandler h = null; ExchangeInventoryContext xc; FleetInventoryContext fc;
+            Locked(() =>
+            {
+                page = OpenTradePage(qb.market.ex, out h, out xc, out fc);
+                foreach (var sh in page.GetShipsForPanel(PanelRole.ShopSystem))
+                    if (sh?.bean != null && sh.getUid() == target && h.HandleShipTransfer(sh, PanelRole.ShopSystem, h.CurrentPlayerRole)) put++;
+            });
+            yield return new WaitForSecondsRealtime(1.5f);
+            Locked(() => DoCheckout.Invoke(page, null));
+            yield return null; yield return null;
+            var e1 = Ledger.entries.Count > n0 ? Ledger.entries[Ledger.entries.Count - 1] : null;
+            long d1 = gd.creditPoint - cp0;
+            bool buyOk = put == 1 && e1 != null && e1.exact && e1.creditDelta == d1 && Math.Abs(-d1 - idea.cost) <= 1.5 && e1.items.Exists(x => x.buy && x.key == plan.key);
+            c.details.Add("buy " + qb.name + " at " + qb.market.name + ": credits " + d1 + ", advice said " + (-idea.cost).ToString("0") + ", ledger " + (e1 == null ? "none" : "exact=" + e1.exact + " " + e1.creditDelta) + (buyOk ? " ok" : " WRONG"));
+            ok &= buyOk;
+            Locked(() => page.RequestClose());
+            yield return Refresh();
+            bool held = plan.state == 1 && plan.boughtQty == 1 && plan.CostKnown && Math.Abs(plan.paidCost + d1) <= 1;
+            c.details.Add("plan after buying: " + plan.StateText + ", cost " + plan.paidCost.ToString("0") + (held ? " ok" : " WRONG"));
+            ok &= held;
+
+            n0 = Ledger.entries.Count; cp0 = gd.creditPoint; put = 0;
+            Locked(() =>
+            {
+                page = OpenTradePage(qs.market.ex, out h, out xc, out fc);
+                foreach (var sh in page.GetShipsForPanel(h.CurrentPlayerRole))
+                    if (put == 0 && sh?.bean != null && sh.getShipId() == qb.itemId && !before.Contains(sh.getUid()) && h.HandleShipTransfer(sh, h.CurrentPlayerRole, PanelRole.ShopSystem)) put++;
+            });
+            yield return new WaitForSecondsRealtime(1.5f);
+            Locked(() => DoCheckout.Invoke(page, null));
+            yield return null; yield return null;
+            var e2 = Ledger.entries.Count > n0 ? Ledger.entries[Ledger.entries.Count - 1] : null;
+            long d2 = gd.creditPoint - cp0;
+            bool sellOk = put == 1 && e2 != null && e2.exact && e2.creditDelta == d2 && Math.Abs(d2 - idea.revenue) <= 1.5;
+            c.details.Add("sell at " + qs.market.name + ": credits " + d2 + ", advice said " + idea.revenue.ToString("0") + ", ledger " + (e2 == null ? "none" : "exact=" + e2.exact + " " + e2.creditDelta) + (sellOk ? " ok" : " WRONG"));
+            ok &= sellOk;
+            Locked(() => page.RequestClose());
+            yield return Refresh();
+            bool done = plan.state == 2 && plan.actualPaid && Math.Abs(plan.soldRevenue - d2) <= 1 && plan.doneNote != null && plan.doneNote.Contains(qs.market.name);
+            c.details.Add("plan after selling: " + plan.StateText + " / " + plan.doneNote + ", profit " + plan.CurProfit.ToString("0") + (done ? " ok" : " WRONG"));
+            ok &= done;
+            c.passed = ok;
+            c.summary = (ok ? "matches the advice and the credits" : "some steps differ") + " (" + qb.name + " " + qb.market.name + " -> " + qs.market.name + ")";
+        }
+
         // Every search box of the panel, clicked the way the game's event system would: the top raycast hit at its centre
         // must be the box, and a pointer click there must focus it. Also notes the event system and cursor state.
         IEnumerator UiInputTest()
@@ -897,7 +1039,7 @@ namespace TradeHelper
                 foreach (var q in m.goods)
                 {
                     var sg = q.specialGoods;
-                    if (!q.special || sg == null || sg.UsesEquipmentPressure || !q.buyable) continue;
+                    if (!q.special || q.ship || sg == null || sg.UsesEquipmentPressure || !q.buyable) continue;
                     if (EventChanged(q)) { evSkip++; continue; }
                     var items = StoreItems(sg);
                     for (int k = 1; k <= Math.Min(5, items.Count); k++)
@@ -926,7 +1068,7 @@ namespace TradeHelper
                 if (!m.Exact) continue;
                 foreach (var q in m.goods)
                 {
-                    if (!q.special || q.specialGoods == null || q.specialGoods.UsesEquipmentPressure) continue;
+                    if (!q.special || q.ship || q.specialGoods == null || q.specialGoods.UsesEquipmentPressure) continue;
                     List<GoodsQuote> l;
                     if (!byGid.TryGetValue(q.gid, out l)) byGid[q.gid] = l = new List<GoodsQuote>();
                     l.Add(q);
@@ -966,7 +1108,7 @@ namespace TradeHelper
                 if (!m.Exact) continue;
                 foreach (var q in m.goods)
                 {
-                    if (!q.special || q.specialGoods == null || q.specialGoods.UsesEquipmentPressure) continue;
+                    if (!q.special || q.ship || q.specialGoods == null || q.specialGoods.UsesEquipmentPressure) continue;
                     string key = q.type + "_" + q.itemId;
                     var held = snap.Held(key);
                     if (held == null || held.Count == 0) continue;
@@ -1073,6 +1215,8 @@ namespace TradeHelper
                 else if (!t.buy.market.Explored || !t.sell.market.Explored) why = "not explored";
                 if (why != null) { bad++; if (c.details.Count < 10) c.details.Add(why + ": " + t.name + " " + t.buy.market.name + " -> " + t.sell.market.name); }
             }
+            foreach (var t in snap.trades.FindAll(x => x.buy.ship).Take(5))
+                c.details.Add("ship: " + t.name + " x" + t.qty + " " + t.buy.market.name + " -> " + t.sell.market.name + " cost " + t.cost.ToString("0") + " revenue " + t.revenue.ToString("0") + " profit " + t.Profit.ToString("0"));
             for (int i = 0; i < Math.Min(5, snap.trades.Count); i++)
             {
                 var t = snap.trades[i];

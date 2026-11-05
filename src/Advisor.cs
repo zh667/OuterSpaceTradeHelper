@@ -50,7 +50,7 @@ namespace TradeHelper
             foreach (var m in snap.markets)
                 foreach (var q in m.goods)
                 {
-                    if (!Usable(q, cfg) || q.type == 550) continue; // ships: price depends on defects
+                    if (!Usable(q, cfg)) continue;
                     List<GoodsQuote> l;
                     if (!byGid.TryGetValue(q.gid, out l)) byGid[q.gid] = l = new List<GoodsQuote>();
                     l.Add(q);
@@ -144,6 +144,7 @@ namespace TradeHelper
             {
                 if (Budget.Over) { Budget.tSells += System.Diagnostics.Stopwatch.GetTimestamp() - t0; yield return null; t0 = System.Diagnostics.Stopwatch.GetTimestamp(); }
                 string gid;
+                if (kv.Key.StartsWith("550_")) continue;   // the player's own warships are not stock to sell off
                 if (!snap.itemKeyToGid.TryGetValue(kv.Key, out gid)) continue;
                 SellIdea best = null;
                 foreach (var m in snap.markets)

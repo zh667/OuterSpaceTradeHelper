@@ -53,6 +53,26 @@ namespace TradeHelper
             return baseFactor * Math.Max(minCoef, store);
         }
 
+        // Ships (type 550). The trade page prices every ship on its own, at the market's occupancy when the page is shown
+        // (PageTradeInventory.GetShipsForPanel -> FWExchangeSpace.getSpecialGoodsPriceToSell(ship) -> calculatePrice of
+        // that one ship), for buying and selling alike, and keeps those prices until the checkout. So within a checkout
+        // ships do not get dearer or cheaper one after another. FWExchangeSpaceSpecialGoods.getInstancePriceCoefficient:
+        // pBase x max(0.5, pStore) x 1 / 0.4 / 0.1 / 0.01 for 0 / 1 / 2 / more defects.
+        public bool ship;
+        public List<FWAirShip> storeShips;   // in store, fewest defects first
+        public int[] shipDefects;
+
+        public static double DefectFactor(int defects) => defects <= 0 ? 1.0 : defects == 1 ? 0.4 : defects == 2 ? 0.1 : 0.01;
+
+        public double ShipAt(int defects)
+        {
+            float e = Math.Max(1f, ePool);
+            double store = 1.0 - Math.Max(0.0, occupancy - e) / e;
+            return baseFactor * Math.Max(minCoef, store) * DefectFactor(defects);
+        }
+
+        public static int Defects(FWBaseBean b) { try { return b is FWAirShip s ? s.GetDefectCount() : 0; } catch { return 0; } }
+
         // Special goods (not ships) in store, best durability first, as the player would pick them: durability factor of
         // each item and the running sum before it. FWExchangeSpaceSpecialGoods.calculatePrice prices an item at
         // pBase x max(min, durability x pStore(occupancy)) and moves the occupancy by its durability.
@@ -78,6 +98,7 @@ namespace TradeHelper
         // bought from another market's store starting at its `start`-th best item (their durability carries over).
         public double SellBoughtUnit(int from, GoodsQuote bought, int start, int i)
         {
+            if (ship) return ShipAt(bought?.shipDefects != null && start + i < bought.shipDefects.Length ? bought.shipDefects[start + i] : 0);
             if (!special || bought?.storeDur == null || start + i >= bought.storeDur.Length) return SellUnit(from + i);
             double occ = occupancy + from + (bought.durBefore[start + i] - bought.durBefore[start]);
             return ItemAt(bought.storeDur[start + i], occ);
@@ -85,6 +106,12 @@ namespace TradeHelper
 
         public double SellBoughtRevenue(int from, GoodsQuote bought, int start, int k)
         {
+            if (ship)
+            {
+                double t = 0;
+                for (int i = 0; i < k; i++) t += SellBoughtUnit(from, bought, start, i);
+                return t * (1 - tax);
+            }
             if (!special || bought?.storeDur == null || start + k > bought.storeDur.Length)
                 return SellRevenue(from + k) - (from > 0 ? SellRevenue(from) : 0);
             double sum = 0;
@@ -96,6 +123,7 @@ namespace TradeHelper
         // FWExchangeSpaceSpecialGoods.calculatePrice: each unit is priced at the occupancy before it moves.
         public double BuyUnit(int i)
         {
+            if (ship) return ShipAt(shipDefects != null && i < shipDefects.Length ? shipDefects[i] : 0);
             if (special)
             {
                 if (storeDur != null && i < storeDur.Length) return ItemAt(storeDur[i], occupancy - durBefore[i]);
@@ -106,6 +134,7 @@ namespace TradeHelper
 
         public double SellUnit(int i)
         {
+            if (ship) return ShipAt(0);
             if (special) return SpecialAt(occupancy + i);
             return NormalAt(stock + i + 0.5, pressure - i - 0.5);
         }
@@ -143,6 +172,19 @@ namespace TradeHelper
         public double SellHeld(int from, int k, List<FWBaseBean> items)
         {
             if (k <= 0) return 0;
+            if (ship && items != null && from + k <= items.Count)
+            {
+                // Each ship on its own, as the trade page prices it.
+                bool live = exact && specialGoods != null && StillExact();
+                double t = 0;
+                for (int i = from; i < from + k; i++)
+                {
+                    double p = -1;
+                    if (live) { try { p = specialGoods.getPriceForPlayerSell(items[i]); } catch { p = -1; } }
+                    t += p >= 0 ? p : ShipAt(Defects(items[i]));
+                }
+                return t * (1 - tax);
+            }
             if (special && exact && specialGoods != null && items != null && from + k <= items.Count && StillExact())
             {
                 try
@@ -224,6 +266,7 @@ namespace TradeHelper
         public Dictionary<string, string> baseOnStar = new Dictionary<string, string>();               // starId -> player's base name
         public Dictionary<string, List<FWBaseBean>> heldItems = new Dictionary<string, List<FWBaseBean>>(); // key -> the player's items, one entry per unit
         public List<FWBaseBean> Held(string key) { List<FWBaseBean> l; return key != null && heldItems.TryGetValue(key, out l) ? l : null; }
+        public void AddHeld(string key, FWBaseBean b) { List<FWBaseBean> l; if (!heldItems.TryGetValue(key, out l)) heldItems[key] = l = new List<FWBaseBean>(); l.Add(b); }
         readonly HashSet<string> heldSorted = new HashSet<string>();
         // The player's items of a goods, best durability first (the durability factor depends on the item only, so any
         // market's goods line can rank them). Sorted once per snapshot.
@@ -231,7 +274,7 @@ namespace TradeHelper
         {
             var l = Held(key);
             if (l == null || sg == null || heldSorted.Contains(key)) return l;
-            try { l.Sort((a, b) => sg.getPDurability(b).CompareTo(sg.getPDurability(a))); } catch { }
+            try { l.Sort((a, b) => sg.getPDurability(b).CompareTo(sg.getPDurability(a))); } catch { }   // ships: fewer defects = higher factor
             heldSorted.Add(key);
             return l;
         }
@@ -997,8 +1040,16 @@ namespace TradeHelper
                             if (g.goods is FWAirShip) ships = true;
                         }
                     q.occupancy = occ;
-                    // Ships are priced by their defects, not durability: they keep the plain model.
+                    // Ships are priced by their defects, not durability (see GoodsQuote.ship).
                     if (!ships && !sg.UsesEquipmentPressure && durs.Count > 0) q.SetStoreDurability(durs);
+                    if (sg.itemType == 550)
+                    {
+                        q.ship = true;
+                        q.storeShips = new List<FWAirShip>();
+                        if (sg.goodsList != null) foreach (var g in sg.goodsList) if (g?.goods is FWAirShip a) q.storeShips.Add(a);
+                        q.storeShips.Sort((a, b) => GoodsQuote.Defects(a).CompareTo(GoodsQuote.Defects(b)));
+                        q.shipDefects = q.storeShips.ConvertAll(a => GoodsQuote.Defects(a)).ToArray();
+                    }
                     q.buyable = !sg.isContraband && q.stock > 0;
                     q.minCoef = sg.itemType == 550 ? 0.5f : 0.1f;
                     // Same arithmetic as FWExchangeSpaceSpecialGoods.getPBase(), times the event price factor that
@@ -1079,6 +1130,16 @@ namespace TradeHelper
                     var loc = new InvLocation { name = (string.IsNullOrEmpty(fleet.name) ? "舰队" : fleet.name) + "（舰队背包）", galaxyId = fleet.pos?.galaxyId };
                     var things = fleet.getThings();
                     if (things != null) AddThings(loc, new List<FWThingBean>(things), snap);
+                    // The fleet's ships, as goods "550_<ship id>" (a plan that trades ships follows them like goods).
+                    var ships = fleet.ships;
+                    if (ships != null)
+                        foreach (var s in new List<FWAirShip>(ships))
+                        {
+                            if (s == null || string.IsNullOrEmpty(s.id)) continue;
+                            var k = "550_" + s.id;
+                            int v; loc.items.TryGetValue(k, out v); loc.items[k] = v + 1;
+                            snap.AddHeld(k, s);
+                        }
                     snap.inventory.Add(loc);
                 }
             }

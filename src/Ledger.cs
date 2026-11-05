@@ -189,8 +189,13 @@ namespace TradeHelper
                         b.items.Add(new LedgerItem { key = key, name = goodsName(key) ?? key, buy = buying, qty = it.Quantity, raw = raw });
                         if (buying) b.buy += raw; else b.sell += raw;
                     }
-                foreach (var ship in h.BuyShipCart) { b.buy += ship.tempDisplayPrice; b.items.Add(new LedgerItem { key = "ship", name = "舰船", buy = true, qty = 1, raw = ship.tempDisplayPrice }); }
-                foreach (var ship in h.SellShipCart) { b.sell += ship.tempDisplayPrice; b.items.Add(new LedgerItem { key = "ship", name = "舰船", buy = false, qty = 1, raw = ship.tempDisplayPrice }); }
+                foreach (bool buying in new[] { true, false })
+                    foreach (var ship in buying ? h.BuyShipCart : h.SellShipCart)
+                    {
+                        string key = "550_" + ship.getShipId();
+                        if (buying) b.buy += ship.tempDisplayPrice; else b.sell += ship.tempDisplayPrice;
+                        b.items.Add(new LedgerItem { key = key, name = goodsName(key) ?? "舰船", buy = buying, qty = 1, raw = ship.tempDisplayPrice });
+                    }
                 foreach (var crew in h.BuyCrewCart) { double p = (float)mCrew.Invoke(page, new object[] { crew, true }); b.buy += p; b.items.Add(new LedgerItem { key = "crew", name = "人员", buy = true, qty = 1, raw = p }); }
                 foreach (var crew in h.SellCrewCart) { double p = (float)mCrew.Invoke(page, new object[] { crew, false }); b.sell += p; b.items.Add(new LedgerItem { key = "crew", name = "人员", buy = false, qty = 1, raw = p }); }
                 // The checkout (PageTradeInventory.DoExchangeCheckout) rounds the two totals once each.
