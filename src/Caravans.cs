@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using TradeHelper.Ui;
+using UnityEngine;
 
 namespace TradeHelper
 {
@@ -21,14 +22,101 @@ namespace TradeHelper
         public double Gain => double.IsNaN(unit) ? double.NaN : sells ? (double.IsNaN(best) ? double.NaN : best - unit) : (double.IsNaN(best) ? unit : unit - best);
     }
 
+    // How long a caravan or smuggler in the scene still has on its route. The game ends it when it has flown its route
+    // (GalaxyNPCFleet.OnPathCompleted -> settled "NaturalComplete"), usually long before its disappear time. Every
+    // second: its position (GalaxyNPCFleet local position), its next route point (path module's CurrentPathIndex into the
+    // route the game restored from FWFactionFleet.activityRoutePoints), the route length left, and its speed measured
+    // from how far it moved per game minute. Read-only, main thread.
+    public static class Motion
+    {
+        class Track { public Vector2 pos; public long mm; public double speed = -1; public int idx = -1, points; public double left = -1; public float seen; }
+        static readonly Dictionary<long, Track> tracks = new Dictionary<long, Track>();
+        static float next;
+
+        public static void Tick(FWGameData gd, Snapshot snap)
+        {
+            if (gd == null || snap == null || Time.unscaledTime < next) return;
+            next = Time.unscaledTime + 1f;
+            var mgr = Script.FreeWorldAirShip.Galaxy.NPCFleet.GalaxyNPCFleetManager.Instance;
+            if (mgr == null) return;
+            long mm = gd.elapsedMM;
+            foreach (var c in snap.caravans)
+            {
+                if (c.route == null || c.journey) continue;
+                Script.FreeWorldAirShip.Galaxy.NPCFleet.GalaxyNPCFleet npc = null;
+                try { npc = mgr.GetFleetByUid(c.uid); } catch { }
+                if (npc == null || !npc) continue;
+                Vector2 p = npc.GetLocalPosition();
+                // The path it really flies (the path module's PathPoints): the game rebuilds it when the fleet comes into
+                // the scene (a smuggler gets a new black-market route; other duties have their points resolved), so it is
+                // not the saved route.
+                int idx = -1; List<Vector2> path = null;
+                try
+                {
+                    var pf = npc.GetModule<Script.FreeWorldAirShip.Galaxy.NPCFleet.Modules.GalaxyNPCFleetPathFindingModule>();
+                    if (pf != null && pf.HasValidPath) { idx = pf.CurrentPathIndex; path = pf.PathPoints; }
+                }
+                catch { }
+                Track t;
+                if (!tracks.TryGetValue(c.uid, out t)) { t = new Track { pos = p, mm = mm }; tracks[c.uid] = t; }
+                else if (mm > t.mm)
+                {
+                    double d = Vector2.Distance(p, t.pos), dt = mm - t.mm;
+                    if (d > 1e-4)
+                    {
+                        double v = d / dt;   // units per game millisecond
+                        t.speed = t.speed < 0 ? v : t.speed * 0.6 + v * 0.4;
+                    }
+                    t.pos = p; t.mm = mm;
+                }
+                t.seen = Time.unscaledTime;
+                t.idx = idx;
+                t.points = path != null ? path.Count : 0;
+                t.left = idx >= 0 ? RouteLeft(path, idx, p) : -1;
+            }
+        }
+
+        // Route length still to fly: to the next point, then the remaining segments.
+        public static double RouteLeft(List<Vector2> route, int idx, Vector2 pos)
+        {
+            if (route == null || idx < 0 || idx >= route.Count) return -1;
+            double s = Vector2.Distance(pos, route[idx]);
+            for (int i = idx + 1; i < route.Count; i++) s += Vector2.Distance(route[i - 1], route[i]);
+            return s;
+        }
+
+        // Game time until it finishes its route, or -1 when not known yet (not in the scene, or not moved yet).
+        public static long LeaveMM(long uid)
+        {
+            Track t;
+            if (!tracks.TryGetValue(uid, out t) || t.speed <= 0 || t.left < 0 || Time.unscaledTime - t.seen > 5f) return -1;
+            return (long)(t.left / t.speed);
+        }
+
+        public static string Describe(long uid)
+        {
+            Track t;
+            return tracks.TryGetValue(uid, out t) ? "point " + t.idx + " of " + t.points + ", path left " + t.left.ToString("0.0") + ", speed/h " + (t.speed * 60000).ToString("0.00") : "none";
+        }
+    }
+
     // One galaxy in the smuggler forecast.
     public class SmugglerSpot
     {
         public const int Here = 0, Due = 1, Wait = 2, Unknown = 3, Never = 4;
         public string galaxyId, galaxyName, smuggler;
+        public long smugglerUid = -1;
         public double fleetAu = -1;
         public int state, observe;
         public long waitMM, leftMM = -1;
+        // Where the smuggler would appear if the fleet enters this galaxy's view today (the game's own plan for the
+        // seed of this galaxy, slot and day): its first point and route, local coordinates.
+        public bool predicted;
+        public Vector2 predStart;
+        public List<Vector2> predRoute;
+        public long predDay = -1;
+        public int predSlot = -1;
+        public string predNote;
         public string NotVisitedTag => observe >= 2 ? "" : observe >= 1 ? "（未探索）" : "（未发现）";
         public string StateText
         {
@@ -56,6 +144,8 @@ namespace TradeHelper
         public int observe;              // galaxy exploration state (MarketInfo.observe)
         public double fleetAu = -1;
         public long leftMM = -1;         // game time until it leaves (-1: no set departure)
+        public List<Vector2> route;      // its route in the galaxy (FWFactionFleet.activityRoutePoints, local coordinates)
+        public bool journey;             // crossing galaxies (FleetJourney): no route end here
         public long cash;                // the caravan's own credits: it cannot pay more than this for what it buys
         public int priceModifier = 150;  // the fleet's price modifier towards the player, percent (FWFleetRelation.priceModifier)
         public bool metPlayer;           // a relation record with the player's fleet exists
@@ -186,6 +276,43 @@ namespace TradeHelper
             catch { return -1; }
         }
 
+        // The smuggler the game would create on entering the galaxy view today (NomadicFleetSpawnService.TrySpawn):
+        // slot = the first "nomadic-low-frequency:<galaxy>:smuggler:<i>" no unsettled fleet holds; seed = FNV-1a of
+        // "<galaxy>:8:<slot>:<day>" (BuildStableSeed, day = FWGameData.ForceTime_Day); cycles =
+        // NomadicFleetSpawnRules.ResolvePlannedCycles; then the game's own TryBuildLowFrequencyPlan on the galaxy's
+        // spatial map (GalaxySpatialMapProvider.Resolve). No randomness beyond the seed.
+        static System.Reflection.MethodInfo planFn;
+        static void Predict(FWGameData gd, string galaxyId, List<FWFactionFleet> repo, SmugglerSpot s)
+        {
+            var star = GalaxyMapData.getInstance()?.getGalaxyStar(galaxyId);
+            if (star == null) { s.predNote = "找不到这个星系"; return; }
+            var map = Script.FreeWorldAirShip.Galaxy.NPCFleet.Modules.GalaxySpatialMapProvider.Resolve(gd, star);
+            if (map == null) { s.predNote = "这个星系还没有空间图"; return; }
+            int slot = -1;
+            for (int i = 0; i < 64 && slot < 0; i++)
+            {
+                string key = "nomadic-low-frequency:" + galaxyId + ":smuggler:" + i;
+                bool used = false;
+                foreach (var f in repo) if (f != null && !f.resultSettled && f.activityTargetKey == key) { used = true; break; }
+                if (!used) slot = i;
+            }
+            long day = gd.ForceTime_Day;
+            string text = galaxyId + ":8:" + slot + ":" + Math.Max(0L, day);
+            uint h = 2166136261u;
+            unchecked { foreach (char ch in text) h = (h ^ ch) * 16777619; }
+            int seed = (int)(h & 0x7FFFFFFF);
+            int cycles = NomadicFleetSpawnRules.ResolvePlannedCycles((int)GalaxyNPCFleetType.Smuggler, seed);
+            if (planFn == null)
+                planFn = typeof(NomadicFleetSpawnService).GetMethod("TryBuildLowFrequencyPlan", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+            if (planFn == null) { s.predNote = "游戏的出生点函数变了（游戏更新？）"; return; }
+            var args = new object[] { map, (int)GalaxyNPCFleetType.Smuggler, seed, cycles, null, null };
+            if (!(bool)planFn.Invoke(null, args)) { s.predNote = "这个星系今天挑不出出生点（游戏会刷不出来）"; return; }
+            s.predicted = true;
+            s.predStart = (Vector2)args[4];
+            s.predRoute = new List<Vector2>((List<Vector2>)args[5]);
+            s.predDay = day; s.predSlot = slot;
+        }
+
         public const long RefreshIntervalMM = 7200000L;   // NomadicFleetSpawnRules.RefreshInterval: 5 game days
 
         static void Forecast(FWGameData gd, Snapshot snap, List<FWFactionFleet> repo, Dictionary<string, int> observe)
@@ -212,6 +339,7 @@ namespace TradeHelper
                     s.state = SmugglerSpot.Here;
                     var c = snap.caravans.Find(x => x.uid == sm.uid);
                     s.smuggler = c != null ? c.FullName : sm.Name;
+                    s.smugglerUid = sm.uid;
                     s.leftMM = sm.activityDisappearTime > 0 ? Math.Max(0, sm.activityDisappearTime - now) : -1;
                 }
                 else
@@ -223,6 +351,11 @@ namespace TradeHelper
                         s.waitMM = Math.Max(0, g.nextNomadicFleetRefreshTime - now);
                         s.state = host < 0 ? SmugglerSpot.Unknown : s.waitMM == 0 ? SmugglerSpot.Due : SmugglerSpot.Wait;
                     }
+                }
+                if (s.state == SmugglerSpot.Due && g.id == snap.fleetGalaxyId)
+                {
+                    try { Predict(gd, g.id, repo, s); }
+                    catch (Exception e) { s.predNote = "算不出出生点：" + (e.InnerException ?? e).Message; }
                 }
                 snap.smugglerSpots.Add(s);
             }
@@ -253,6 +386,12 @@ namespace TradeHelper
             if (f.activityDisappearTime > 0) c.leftMM = Math.Max(0, f.activityDisappearTime - now);
             if (f.activityAppearTime > now) c.status = "还没出现（约 " + Math.Max(1, (f.activityAppearTime - now) / GameHourMM) + " 小时后）";
             else c.status = f.journey != null ? "跨星系航行中（位置会变）" : "在这个星系里";
+            c.journey = f.journey != null;
+            if (f.activityRoutePoints != null && f.activityRoutePoints.Count >= 2)
+            {
+                c.route = new List<Vector2>(f.activityRoutePoints.Count);
+                foreach (var pt in f.activityRoutePoints) if (pt != null) c.route.Add(new Vector2(pt.x, pt.y));
+            }
             if (c.kept)
                 c.priceNote = "它现在不在场景里（舰队在它所在的星系、进入星系画面时才会出场：左上角“至星系”，F11；星域图拉近看到的星系里没有 NPC 舰队），下面是上次出场时的货和价格，出场后可能已经变了；不在场景里时不能交易";
             if (car == null)

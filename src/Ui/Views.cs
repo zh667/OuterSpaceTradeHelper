@@ -285,7 +285,40 @@ namespace TradeHelper.Ui
         // The game ends a caravan or smuggler at its disappear time or when it has flown its whole route in the galaxy
         // view (GalaxyNPCFleet.OnPathCompleted -> settled "NaturalComplete"), whichever comes first; the second can be
         // much earlier, and a fleet that comes into the scene long after it appeared may end right away.
-        static string LeaveNote(CaravanInfo c) => c.leftMM < 0 ? "" : "（跑完航线会提前走）";
+        static string LeaveNote(CaravanInfo c)
+        {
+            long e = EstLeave(c);
+            if (e >= 0) return e == c.leftMM ? "（到消失时间离开，航线还跑不完）" : "（按它现在的速度，约 " + Left(e) + "后跑完航线离开；它停下来时估得偏长）";
+            return c.leftMM < 0 ? "" : c.journey ? "（跨星系航行，路过这里）" : "（这是最晚时间；它在星系里跑完航线就会提前走，进星系画面后这里会估出大约时间）";
+        }
+
+        // When it leaves: the end of its route (measured while it is in the scene) or its disappear time, whichever
+        // comes first; -1 when only the disappear time is known.
+        public static long EstLeave(CaravanInfo c)
+        {
+            long e = Motion.LeaveMM(c.uid);
+            if (e < 0) return -1;
+            return c.leftMM >= 0 ? Math.Min(e, c.leftMM) : e;
+        }
+
+        // Estimated time to the end of its route while it is in the scene (约), else the latest time.
+        public static string LeftText(CaravanInfo c)
+        {
+            long e = EstLeave(c);
+            if (e >= 0) return "约 " + Left(e);
+            return c.leftMM < 0 ? Left(c.leftMM) : "最多 " + Left(c.leftMM);
+        }
+
+        float nextBind;
+        public override void Tick()
+        {
+            // The route estimate moves every second.
+            if (Time.unscaledTime < nextBind) return;
+            nextBind = Time.unscaledTime + 1f;
+            list.Bind();
+            spots.Bind();
+            if (selected != null && Motion.LeaveMM(selected.uid) >= 0) ShowLines();
+        }
 
         static string Price(double v) => double.IsNaN(v) ? "—" : Fmt.Money(v);
 
@@ -301,7 +334,8 @@ namespace TradeHelper.Ui
                 new Column<CaravanInfo> { title = "商队", width = 170, text = c => (c.black ? "走私 · " : "") + c.FullName, key = c => c.name, color = c => c.black ? Theme.Warn : Theme.Text },
                 new Column<CaravanInfo> { title = "星系", width = 110, text = c => c.galaxyName + c.NotVisitedTag, key = c => c.galaxyName, color = c => c.observe >= 2 ? Theme.Text : Theme.Text2 },
                 new Column<CaravanInfo> { title = "距舰队", width = 90, text = c => Fmt.Dist(c.fleetAu), key = c => c.fleetAu < 0 ? (IComparable)null : c.fleetAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
-                new Column<CaravanInfo> { title = "最多还剩", width = 90, text = c => Left(c.leftMM), key = c => c.leftMM < 0 ? long.MaxValue : c.leftMM, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<CaravanInfo> { title = "还剩", width = 90, text = c => LeftText(c), key = c => { long e = EstLeave(c); return e >= 0 ? e : c.leftMM < 0 ? long.MaxValue : c.leftMM; }, numeric = true, align = TextAlignmentOptions.MidlineRight,
+                    color = c => EstLeave(c) >= 0 ? Theme.Warn : Theme.Text },
                 new Column<CaravanInfo> { title = "关系", width = 60, text = c => c.present ? c.relation : c.kept ? "不在场景" : "未出场", key = c => c.relation, color = c => c.hostile ? Theme.Bad : Theme.Text2 },
                 new Column<CaravanInfo> { title = "", width = 70, buttonText = c => Tracker.IsTracked(c.uid) ? "追踪中" : "追踪", buttonPrimary = c => Tracker.IsTracked(c.uid),
                     onButton = c => { if (Tracker.IsTracked(c.uid)) Tracker.Stop(); else Tracker.Track(c); } },
@@ -325,8 +359,11 @@ namespace TradeHelper.Ui
                 new Column<SmugglerSpot> { title = "距舰队", width = 100, text = x => Fmt.Dist(x.fleetAu), key = x => x.fleetAu < 0 ? (IComparable)null : x.fleetAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<SmugglerSpot> { title = "走私船", width = 200, text = x => x.StateText, key = x => x.state * 1000000000L + x.waitMM, numeric = true,
                     color = x => x.state == SmugglerSpot.Here ? Theme.Warn : x.state == SmugglerSpot.Due ? Theme.Good : Theme.Text2 },
-                new Column<SmugglerSpot> { title = "什么时候", width = 120, text = x => x.state == SmugglerSpot.Here ? "最多还剩 " + Left(x.leftMM) : x.state == SmugglerSpot.Wait ? Left(x.waitMM) + "后" : x.state == SmugglerSpot.Due ? "现在" : "",
+                new Column<SmugglerSpot> { title = "什么时候", width = 120, text = x => x.state == SmugglerSpot.Here ? (Motion.LeaveMM(x.smugglerUid) >= 0 ? "约 " + Left(Motion.LeaveMM(x.smugglerUid)) : "最多 " + Left(x.leftMM)) : x.state == SmugglerSpot.Wait ? Left(x.waitMM) + "后" : x.state == SmugglerSpot.Due ? "现在" : "",
                     key = x => x.state == SmugglerSpot.Here ? -1 : x.state == SmugglerSpot.Due ? 0 : x.state == SmugglerSpot.Wait ? x.waitMM : long.MaxValue, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<SmugglerSpot> { title = "出生点", width = 90, buttonText = x => x.predicted ? (Tracker.pointMode && Tracker.galaxyId == x.galaxyId ? "标记中" : "标出来") : "",
+                    buttonEnabled = x => x.predicted, buttonPrimary = x => Tracker.pointMode && Tracker.galaxyId == x.galaxyId,
+                    onButton = x => { if (Tracker.pointMode && Tracker.galaxyId == x.galaxyId) Tracker.Stop(); else { Tracker.TrackPoint(x.galaxyId, x.galaxyName, x.predStart, "走私船出生点（今天进星系画面会刷在这里）"); Tracker.Focus(); } spots.Bind(); list.Bind(); } },
             };
             Glossary.Apply(scols, "smuggler");
             spots = new Table<SmugglerSpot>(root, 0, fy + 34, LW, w.BodyH - fy - 34, scols, 1, false);
@@ -366,7 +403,7 @@ namespace TradeHelper.Ui
             var c = selected;
             if (c.smuggler)
             {
-                head.text = "<b>黑潮走私船  " + c.FullName + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    最多还剩 " + Left(c.leftMM) + LeaveNote(c)
+                head.text = "<b>黑潮走私船  " + c.FullName + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    还剩 " + LeftText(c) + LeaveNote(c)
                     + "\n<size=13><color=#A4A5A6>走私船没有交易窗口，只能在对话里选固定的买卖：买方铀矿石、氦-3（每支船各卖一次）、导航核心；"
                     + "“出售货舱里的可疑货物”会把舰队货舱里它清单上的货（辐射物、器官和义体、舰炮、生物材料，共 " + c.smugglerListSize + " 种）一次全卖掉，每个按固定基价 ×2，不扣税，每支船只收一次。"
                     + (c.smugglerSold ? "<color=#D8982F>这支船已经收过一次。</color>" : c.smugglerSaleKinds > 0 ? "现在卖给它：" + c.smugglerSaleKinds + " 种货，一共 " + Fmt.Money(c.smugglerSaleTotal) + "。" : "你舰队货舱里现在没有它收的货（下面数量为 0 的就是它收的）。")
@@ -377,12 +414,12 @@ namespace TradeHelper.Ui
             }
             if (!c.present && c.lines.Count == 0)
             {
-                head.text = "<b>" + c.kind + "  " + c.FullName + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    最多还剩 " + Left(c.leftMM) + LeaveNote(c)
+                head.text = "<b>" + c.kind + "  " + c.FullName + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    还剩 " + LeftText(c) + LeaveNote(c)
                     + "\n<size=13><color=#D8982F>" + c.priceNote + "</color></size>";
                 lines.SetData(c.lines);
                 return;
             }
-            head.text = "<b>" + c.kind + "  " + c.FullName + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    最多还剩 " + Left(c.leftMM) + LeaveNote(c)
+            head.text = "<b>" + c.kind + "  " + c.FullName + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    还剩 " + LeftText(c) + LeaveNote(c)
                 + "\n<size=13><color=#A4A5A6>商队资金 " + Fmt.Money(c.cash) + "  ·  税 " + (c.tax * 100).ToString("0") + "%（按来源站 " + c.source + "）  ·  价格系数 " + c.priceModifier + "%"
                 + (c.metPlayer ? "" : "（还没打过交道，按游戏默认）") + "：买它的货 ×" + c.FactorBuy.ToString("0.##") + "，卖给它 ×" + c.FactorSell.ToString("0.##")
                 + "\n怎么交易：舰队飞到它旁边，点它对话，选“查看货物清单”；“与对方议价”可能压低价格系数，这里会跟着变。通缉值高了它会拒绝交易。卖给商队的货不检查违禁。“它收你的”里数量为 0 的是它收、但你舰队背包里没有的货。"
