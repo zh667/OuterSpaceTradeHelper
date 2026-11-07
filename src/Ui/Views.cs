@@ -288,7 +288,11 @@ namespace TradeHelper.Ui
         static string LeaveNote(CaravanInfo c)
         {
             long e = EstLeave(c);
-            if (e >= 0) return e == c.leftMM ? "（到消失时间离开，航线还跑不完）" : "（按它现在的速度，约 " + Left(e) + "后跑完航线离开；它停下来时估得偏长）";
+            bool live = Motion.LeaveMM(c.uid) >= 0;
+            if (e >= 0 && e == c.leftMM) return "（到消失时间离开，航线还跑不完）";
+            if (e >= 0 && live) return "（按它现在的速度，约 " + Left(e) + "后跑完航线离开；它停下来时估得偏长）";
+            if (e == 0) return "（它不在场景里，但出现已久，航线早该跑完：游戏会在你进星系画面时补算，它一出场就离开）";
+            if (e > 0) return "（它不在场景里，按一般速度估，约 " + Left(e) + "后跑完航线；进星系画面后会按实际速度估）";
             return c.leftMM < 0 ? "" : c.journey ? "（跨星系航行，路过这里）" : "（这是最晚时间；它在星系里跑完航线就会提前走，进星系画面后这里会估出大约时间）";
         }
 
@@ -297,16 +301,47 @@ namespace TradeHelper.Ui
         public static long EstLeave(CaravanInfo c)
         {
             long e = Motion.LeaveMM(c.uid);
+            if (e < 0) e = RoughLeave(c);
             if (e < 0) return -1;
             return c.leftMM >= 0 ? Math.Min(e, c.leftMM) : e;
+        }
+
+        // Not in the scene: the game catches up its flight when it comes into the scene, so it has flown about
+        // (time since it appeared) x the typical speed of its route; 0 = it will end as soon as the galaxy view opens.
+        public static long RoughLeave(CaravanInfo c)
+        {
+            if (c.route == null || c.journey || c.appearMM <= 0 || c.routeLen <= 0) return -1;
+            var gd = MarketScanner.Game;
+            if (gd == null) return -1;
+            double flown = Math.Max(0, gd.elapsedMM - c.appearMM) / 60000.0 * Motion.TypicalPerHour;
+            double left = c.routeLen - flown;
+            return left <= 0 ? 0 : (long)(left / Motion.TypicalPerHour * 60000.0);
         }
 
         // Estimated time to the end of its route while it is in the scene (约), else the latest time.
         public static string LeftText(CaravanInfo c)
         {
             long e = EstLeave(c);
+            if (e == 0 && Motion.LeaveMM(c.uid) < 0) return "进场景就走";
             if (e >= 0) return "约 " + Left(e);
             return c.leftMM < 0 ? Left(c.leftMM) : "最多 " + Left(c.leftMM);
+        }
+
+        // "算出生点" works it out (the game's own plan for that galaxy and day); "标出来" marks it on the map.
+        void SpawnButton(SmugglerSpot x)
+        {
+            if (Tracker.pointMode && Tracker.galaxyId == x.galaxyId) { Tracker.Stop(); spots.Bind(); list.Bind(); return; }
+            if (!x.predicted)
+            {
+                if (!Caravans.PredictNow(MarketScanner.Game, x)) { FairyUIDispatcher.showToast("游戏正忙，再点一次"); return; }
+                if (!x.predicted) { FairyUIDispatcher.showToast(x.predNote ?? "算不出出生点"); spots.Bind(); return; }
+            }
+            long now = MarketScanner.Game != null ? MarketScanner.Game.elapsedMM : 0;
+            string when = x.predFromMM > now ? Left(x.predFromMM - now) + "后（下次检查）到再往后 " + Left(x.predUntilMM - x.predFromMM) + "内" : Left(Math.Max(0, x.predUntilMM - now)) + "内";
+            Tracker.TrackPoint(x.galaxyId, x.galaxyName, x.predStart, "走私船出生点（" + x.galaxyName + "，" + when + "进星系画面会刷在这里）");
+            Tracker.Focus();
+            FairyUIDispatcher.showToast(x.galaxyName + " 的走私船出生点：" + when + "进星系画面（F11）有效，过了游戏里的 12:00 换地方");
+            spots.Bind(); list.Bind();
         }
 
         float nextBind;
@@ -361,9 +396,10 @@ namespace TradeHelper.Ui
                     color = x => x.state == SmugglerSpot.Here ? Theme.Warn : x.state == SmugglerSpot.Due ? Theme.Good : Theme.Text2 },
                 new Column<SmugglerSpot> { title = "什么时候", width = 120, text = x => x.state == SmugglerSpot.Here ? (Motion.LeaveMM(x.smugglerUid) >= 0 ? "约 " + Left(Motion.LeaveMM(x.smugglerUid)) : "最多 " + Left(x.leftMM)) : x.state == SmugglerSpot.Wait ? Left(x.waitMM) + "后" : x.state == SmugglerSpot.Due ? "现在" : "",
                     key = x => x.state == SmugglerSpot.Here ? -1 : x.state == SmugglerSpot.Due ? 0 : x.state == SmugglerSpot.Wait ? x.waitMM : long.MaxValue, numeric = true, align = TextAlignmentOptions.MidlineRight },
-                new Column<SmugglerSpot> { title = "出生点", width = 90, buttonText = x => x.predicted ? (Tracker.pointMode && Tracker.galaxyId == x.galaxyId ? "标记中" : "标出来") : "",
-                    buttonEnabled = x => x.predicted, buttonPrimary = x => Tracker.pointMode && Tracker.galaxyId == x.galaxyId,
-                    onButton = x => { if (Tracker.pointMode && Tracker.galaxyId == x.galaxyId) Tracker.Stop(); else { Tracker.TrackPoint(x.galaxyId, x.galaxyName, x.predStart, "走私船出生点（今天进星系画面会刷在这里）"); Tracker.Focus(); } spots.Bind(); list.Bind(); } },
+                new Column<SmugglerSpot> { title = "出生点", width = 90,
+                    buttonText = x => x.predicted ? (Tracker.pointMode && Tracker.galaxyId == x.galaxyId ? "标记中" : "标出来") : (x.state == SmugglerSpot.Due || x.state == SmugglerSpot.Wait) ? "算出生点" : "",
+                    buttonPrimary = x => Tracker.pointMode && Tracker.galaxyId == x.galaxyId,
+                    onButton = x => SpawnButton(x) },
             };
             Glossary.Apply(scols, "smuggler");
             spots = new Table<SmugglerSpot>(root, 0, fy + 34, LW, w.BodyH - fy - 34, scols, 1, false);
