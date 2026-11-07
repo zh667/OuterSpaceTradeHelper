@@ -53,9 +53,28 @@ namespace TradeHelper.Ui
             if (focus) Focus();
         }
 
+        // A fixed point instead of a fleet: where a smuggler will appear (local coordinates of the galaxy).
+        public static bool pointMode;
+        static Vector2 pointLocal;
+        public static Vector3 PointWorld => LocalToWorld(pointLocal);
+
+        public static void TrackPoint(string gid, string gname, Vector2 local, string label)
+        {
+            Stop();
+            pointMode = true; pointLocal = local; galaxyId = gid; galaxyName = gname; name = label;
+        }
+
+        // A galaxy-local position (as fleets' GalaxyNPCFleet.GetLocalPosition) in world space: the NPC fleets' parent.
+        public static Vector3 LocalToWorld(Vector2 local)
+        {
+            var mgr = GalaxyNPCFleetManager.Instance;
+            Transform root = mgr != null ? (mgr.transform.Find("Root") ?? mgr.transform) : null;
+            return root != null ? root.TransformPoint(new Vector3(local.x, local.y, 0)) : new Vector3(local.x, local.y, 0);
+        }
+
         public static void Stop()
         {
-            uid = -1; npc = null; Status = "";
+            uid = -1; npc = null; Status = ""; pointMode = false;
             if (canvasGo != null) canvasGo.SetActive(false);
         }
 
@@ -87,11 +106,11 @@ namespace TradeHelper.Ui
         // False when there is nothing to show: no tracked caravan, or it is in another galaxy.
         public static bool Focus()
         {
-            if (uid < 0) return false;
+            if (uid < 0 && !pointMode) return false;
             Find();
             var gs = GalaxyFieldScene.Instance;
             if (gs == null) return false;
-            if (npc == null && !SameGalaxyAsFleet) return false;
+            if (npc == null && !SameGalaxyAsFleet && !pointMode) return false;
             try
             {
                 if (!InGalaxyView)
@@ -112,7 +131,7 @@ namespace TradeHelper.Ui
             var cam = gs.GalaxyFieldCameraController;
             // Instant (ScrollGalaxyPos with no move time = ApplyLayerCutPose): the animated move runs on game time and
             // would not move at all while the game is paused.
-            cam.ScrollGalaxyPos(npc.transform.position, gs.GetGalaxySceneDefaultDistance(), 0f, null);
+            cam.ScrollGalaxyPos(pointMode ? PointWorld : npc.transform.position, gs.GetGalaxySceneDefaultDistance(), 0f, null);
         }
 
         // The fleet's live scene object, from the game's own table of the fleets it shows (GalaxyNPCFleetManager
@@ -276,7 +295,7 @@ namespace TradeHelper.Ui
         // Every frame from TradeHelperBehaviour.Update (main thread).
         public static void Tick()
         {
-            if (uid < 0) return;
+            if (uid < 0 && !pointMode) return;
             if (canvasGo == null) Build();
             if (!canvasGo.activeSelf) canvasGo.SetActive(true);
             Find();
@@ -291,12 +310,18 @@ namespace TradeHelper.Ui
             // (GalaxyNPCFleetManager.RetainForReuse hides only its ship models), and hides its ships at other times.
             // Mark it only while its ships are drawn.
             InStarField = gs != null && gs.CurState == State.GalaxyField;
-            var entry = InStarField ? MapEntry() : null;
+            if (pointMode)
+            {
+                // Shown where the NPC fleets of that galaxy are laid out: its galaxy view, or the star field after it.
+                var pm = GalaxyNPCFleetManager.Instance;
+                Found = pm != null && pm.GetGalaxyId() == galaxyId;
+            }
+            var entry = InStarField && !pointMode ? MapEntry() : null;
             icon = MapDot(entry);
             UsingMapDot = icon != null;
             // Star field: on the map's dot; when the map keeps the fleet's entry but has its dot off (off screen), on the
             // fleet's object, which is where the dot sits (checked by the self-test).
-            Shown = InStarField ? UsingMapDot || (entry != null && entry.gameObject.activeInHierarchy && Found && !npc.HasPendingRemove) : Found && ShipsShown(npc);
+            Shown = pointMode ? Found : InStarField ? UsingMapDot || (entry != null && entry.gameObject.activeInHierarchy && Found && !npc.HasPendingRemove) : Found && ShipsShown(npc);
             bool view = InGalaxyView || InStarField;
             // A requested camera move happens once the galaxy view is up (it may be opening).
             if (focusUntil > 0 && Shown && InGalaxyView)
@@ -309,17 +334,17 @@ namespace TradeHelper.Ui
             {
                 marker.gameObject.SetActive(false);
                 OnScreen = false;
-                Status = "追踪中：" + name + "：" + (InStarField ? WhyNotOnStarField() : Found && view && !Shown ? "它的船现在没显示（游戏把它藏起来了：多半正在进出跃迁门、停靠或刚离开），先不画标记" : WhyNotShown(Found, view));
+                Status = "追踪中：" + name + "：" + (pointMode ? "进入 " + galaxyName + " 的星系画面才标得出（F11）" : InStarField ? WhyNotOnStarField() : Found && view && !Shown ? "它的船现在没显示（游戏把它藏起来了：多半正在进出跃迁门、停靠或刚离开），先不画标记" : WhyNotShown(Found, view));
                 info.text = Status;
                 return;
             }
-            Vector3 target = UsingMapDot ? icon.bounds.center : npc.transform.position;
+            Vector3 target = pointMode ? LocalToWorld(pointLocal) : UsingMapDot ? icon.bounds.center : npc.transform.position;
             Vector3 sp = cam.WorldToScreenPoint(target);
             Projected = sp;
             bool behind = sp.z <= 0;
             float w = Screen.width, h = Screen.height, m = 48;
             OnScreen = !behind && sp.x >= 0 && sp.x <= w && sp.y >= 0 && sp.y <= h;
-            if (InStarField && !UsingMapDot && OnScreen)
+            if (InStarField && !UsingMapDot && OnScreen && !pointMode)
             {
                 // On screen the map would draw its dot; without one the game is not showing the fleet there.
                 marker.gameObject.SetActive(false);

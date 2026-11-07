@@ -119,6 +119,12 @@ namespace TradeHelper
                 Finish(null);
                 yield break;
             }
+            if (req.tests == "smugglerlife")
+            {
+                yield return Guard(SmugglerLife(), "smuggler life and fleet cargo (measurement)");
+                Finish(null);
+                yield break;
+            }
             if (req.tests == "settle-many" || req.tests == "keepfresh")
             {
                 yield return Guard(req.tests == "settle-many" ? ManyDaysCatchUp() : KeepAllFresh(), req.tests);
@@ -1102,6 +1108,173 @@ namespace TradeHelper
             ok &= bad == 0;
             s = string.Join("; ", sb);
             return ok;
+        }
+
+        // Measurement for the player's questions: how much the fleet carries, where transports go, and how long a
+        // freshly spawned smuggler stays in the galaxy view with the clock running, and why it leaves.
+        IEnumerator SmugglerLife()
+        {
+            var c = new Check { name = "smuggler life and fleet cargo (measurement)", info = true, passed = true };
+            result.checks.Add(c);
+            var gd = MarketScanner.Game;
+            var fleet = AirShipLocalData.Instance.getCurFleet();
+            Locked(() =>
+            {
+                float w = 0; var rows = new List<string>();
+                foreach (var t in fleet.bean.getThings())
+                {
+                    if (t == null) continue;
+                    float uw = t.getDef() != null ? t.getDef().Weight : -1;
+                    w += uw * t.sum;
+                    rows.Add(t.type + "_" + t.id + " x" + t.sum + " w" + uw + "=" + (uw * t.sum).ToString("0"));
+                }
+                rows.Sort((x, y) => -float.Parse(x.Substring(x.LastIndexOf('=') + 1)).CompareTo(float.Parse(y.Substring(y.LastIndexOf('=') + 1))));
+                c.details.Add("fleet " + fleet.bean.getUid() + ": ships " + fleet.bean.getShips().Count + ", capacity (SumCapacity) " + fleet.SumCapacity + ", cargo weight " + w.ToString("0") + "; heaviest: " + string.Join(", ", rows.GetRange(0, Math.Min(12, rows.Count))));
+            });
+            Locked(() =>
+            {
+                var ex = gd.expeditionSeq;
+                c.details.Add("transports in flight: " + (ex == null ? 0 : ex.Count));
+                if (ex != null)
+                    foreach (var e in ex)
+                    {
+                        if (e == null) continue;
+                        var fs = new List<string>();
+                        foreach (var f in e.GetType().GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public))
+                        {
+                            object v = null; try { v = f.GetValue(e); } catch { }
+                            if (v == null || v is System.Collections.ICollection || v is string sv && sv.Length == 0) continue;
+                            fs.Add(f.Name + "=" + v);
+                        }
+                        int n = 0; try { foreach (var t in e.things) n += t.sum; } catch { }
+                        c.details.Add("  transport: items " + n + "; " + string.Join(" ", fs.GetRange(0, Math.Min(25, fs.Count))));
+                    }
+            });
+            // A fresh smuggler in the fleet's galaxy (test copy: next check now), then the clock at x3.
+            string fg = fleet.getGalaxyId();
+            Func<FWFactionFleet> sm = () =>
+            {
+                FWFactionFleet r = null;
+                foreach (var f in gd.factionFleetRepository)
+                    if (f != null && f.IsNomadicOwned && f.galaxyId == fg && ImplDef<G_ForceFleetType_Def>.getDataID(f.gForceFleetTypeResId)?.ActivityType == (int)GalaxyNPCFleetType.Smuggler && (r == null || f.activityAppearTime > r.activityAppearTime)) r = f;
+                return r;
+            };
+            Locked(() => { var g = gd.getGalaxy(fg); if (g != null) g.nextNomadicFleetRefreshTime = gd.elapsedMM; });
+            yield return Refresh();
+            var spot = host.Latest.smugglerSpots.Find(x => x.galaxyId == fg);
+            c.details.Add("forecast for " + fg + " before entering: " + (spot == null ? "missing" : spot.StateText + (spot.predicted ? ", spawn point " + spot.predStart.ToString("F2") + ", route " + spot.predRoute.Count + " points, day " + spot.predDay + ", slot " + spot.predSlot : ", no prediction: " + spot.predNote)));
+            try { MainUI_Head.GoGalaxyFleet(); } catch (Exception e) { c.details.Add("GoGalaxyFleet: " + e.Message); }
+            float t0 = Time.realtimeSinceStartup;
+            FWFactionFleet s0 = null;
+            while (Time.realtimeSinceStartup - t0 < 60)
+            {
+                yield return new WaitForSecondsRealtime(1);
+                FWFactionFleet x = null; Locked(() => x = sm());
+                if (x != null && !x.resultSettled && x.fleet != null) { s0 = x; break; }
+            }
+            if (s0 == null) { c.details.Add("no smuggler came into the scene"); yield break; }
+            long spawnMM = s0.activityAppearTime;
+            var mgr = Script.FreeWorldAirShip.Galaxy.NPCFleet.GalaxyNPCFleetManager.Instance;
+            {
+                // The prediction against what the game made.
+                var real = new List<Vector2>(); Locked(() => { foreach (var pt in s0.activityRoutePoints) real.Add(new Vector2(pt.x, pt.y)); });
+                bool same = spot != null && spot.predicted && real.Count == spot.predRoute.Count;
+                float worst = 0;
+                for (int k = 0; same && k < real.Count; k++) worst = Mathf.Max(worst, Vector2.Distance(real[k], spot.predRoute[k]));
+                same &= worst < 0.01f;
+                c.details.Add("spawn prediction: game route " + real.Count + " points starting " + (real.Count > 0 ? real[0].ToString("F2") : "?") + "; predicted " + (spot != null && spot.predicted ? spot.predRoute.Count + " starting " + spot.predStart.ToString("F2") : "none") + "; worst point gap " + worst.ToString("0.000") + (same ? " SAME" : " DIFFERENT"));
+                c.passed &= same;
+                var npc0 = mgr?.GetFleetByUid(s0.uid);
+                if (npc0 != null)
+                {
+                    var w1 = npc0.transform.position; var w2 = Ui.Tracker.LocalToWorld(npc0.GetLocalPosition());
+                    var pf0 = npc0.GetModule<Script.FreeWorldAirShip.Galaxy.NPCFleet.Modules.GalaxyNPCFleetPathFindingModule>();
+                    string pinfo = pf0 == null ? "no path module" : "path index " + pf0.CurrentPathIndex + " next " + pf0.GetNextPathPoint().ToString("F2") + " route[idx] " + (pf0.CurrentPathIndex < real.Count ? real[pf0.CurrentPathIndex].ToString("F2") : "?");
+                    c.details.Add("coordinates: fleet object " + w1.ToString("F2") + " vs local->world " + w2.ToString("F2") + " (gap " + Vector3.Distance(w1, w2).ToString("0.000") + "); " + pinfo);
+                }
+            }
+            // The point marker on the predicted spawn point, now that the galaxy view is up.
+            if (spot != null && spot.predicted)
+            {
+                Ui.Tracker.TrackPoint(fg, "", spot.predStart, "出生点");
+                yield return new WaitForSecondsRealtime(1);
+                var cam = Ui.Tracker.LastCamera;
+                if (cam != null)
+                {
+                    var pr = cam.WorldToScreenPoint(Ui.Tracker.PointWorld); var mk = Ui.Tracker.ScreenPos;
+                    c.details.Add("spawn point marker: shown " + Ui.Tracker.Shown + ", " + (Ui.Tracker.OnScreen ? "on screen at " + mk.ToString("F0") + " for projection " + pr.ToString("F0") : "on the edge " + mk.ToString("F0")) + "; " + Ui.Tracker.Status);
+                }
+                yield return Shot("spawn-point");
+                Ui.Tracker.Stop();
+            }
+            yield return Refresh();
+            // Every caravan and the smuggler in this galaxy: route, the mod's estimate a little after it is seen, and when
+            // and why it really leaves. Clock x3 as the player plays.
+            var watch = new Dictionary<long, string>();
+            var est = new Dictionary<long, KeyValuePair<long, long>>();   // uid -> (estimate, game time it was made)
+            var done = new HashSet<long>();
+            MapManager.setLogicSpeed(3f);
+            float tr = Time.realtimeSinceStartup; long lastLog = -1;
+            while (Time.realtimeSinceStartup - tr < 900)
+            {
+                yield return new WaitForSecondsRealtime(1);
+                long now = gd.elapsedMM;
+                var snapNow = host.Latest;
+                if (Time.realtimeSinceStartup - tr > 5 && (long)(Time.realtimeSinceStartup - tr) % 20 == 0) yield return Refresh();
+                int open = 0;
+                foreach (var ci in host.Latest.caravans)
+                {
+                    if (ci.galaxyId != fg || done.Contains(ci.uid)) continue;
+                    if (!watch.ContainsKey(ci.uid))
+                    {
+                        double len = 0; for (int k = 1; ci.route != null && k < ci.route.Count; k++) len += Vector2.Distance(ci.route[k - 1], ci.route[k]);
+                        watch[ci.uid] = (ci.black ? "smuggler " : "caravan ") + ci.FullName + " (route " + (ci.route?.Count ?? 0) + " points, length " + len.ToString("0.0") + (ci.journey ? ", crossing galaxies" : "") + ", latest " + Ui.CaravansView.Left(ci.leftMM) + ")";
+                    }
+                    long e = Motion.LeaveMM(ci.uid);
+                    if (e >= 0 && (!est.ContainsKey(ci.uid) ? now - spawnMM > 30 * 60000L : now - est[ci.uid].Value >= 2 * 60 * 60000L && !est.ContainsKey(-ci.uid)))
+                    {
+                        // The first estimate (kept for the accuracy check) and a second one 2 h later.
+                        if (est.ContainsKey(ci.uid)) est[-ci.uid] = new KeyValuePair<long, long>(e, now); else est[ci.uid] = new KeyValuePair<long, long>(e, now);
+                        c.details.Add("  estimate for " + watch[ci.uid] + " at +" + ((now - spawnMM) / 60000.0).ToString("0.0") + " h: leaves in about " + (e / 60000.0).ToString("0.0") + " h (" + Motion.Describe(ci.uid) + ")");
+                    }
+                    bool settled = false; string reason = null;
+                    Locked(() => { string g; var ff = FactionFleetRegistryService.Find(gd, ci.uid, out g); settled = ff == null || ff.resultSettled; reason = ff?.settlementReason ?? "gone from the records"; });
+                    if (settled)
+                    {
+                        done.Add(ci.uid);
+                        string acc = "";
+                        KeyValuePair<long, long> kv;
+                        if (est.TryGetValue(ci.uid, out kv))
+                        {
+                            double real = (now - kv.Value) / 60000.0, guess = kv.Key / 60000.0;
+                            acc = "; the estimate said " + guess.ToString("0.0") + " h, it took " + real.ToString("0.0") + " h (off " + (real > 0 ? (Math.Abs(guess - real) / real * 100).ToString("0") : "?") + "%)";
+                            if (est.TryGetValue(-ci.uid, out kv)) { double r2 = (now - kv.Value) / 60000.0, g2 = kv.Key / 60000.0; acc += "; 2 h later it said " + g2.ToString("0.0") + " h, it took " + r2.ToString("0.0") + " h"; }
+                        }
+                        c.details.Add("gone: " + watch[ci.uid] + " after +" + ((now - spawnMM) / 60000.0).ToString("0.0") + " h of the measurement (" + (Time.realtimeSinceStartup - tr).ToString("0") + " s real): " + reason + acc);
+                    }
+                    else open++;
+                }
+                long gh = (now - spawnMM) / 60000;
+                if (gh != lastLog && gh % 2 == 0)
+                {
+                    lastLog = gh;
+                    var parts = new List<string>();
+                    foreach (var kv in watch)
+                    {
+                        if (done.Contains(kv.Key)) continue;
+                        var n = mgr?.GetFleetByUid(kv.Key);
+                        if (n == null) { parts.Add(kv.Key % 100000 + ": no scene object"); continue; }
+                        string pfs = "?";
+                        try { var pf = n.GetModule<Script.FreeWorldAirShip.Galaxy.NPCFleet.Modules.GalaxyNPCFleetPathFindingModule>(); pfs = pf == null ? "no path module" : "valid " + pf.HasValidPath + " " + pf.CurrentPathIndex + "/" + pf.PathPoints.Count; } catch (Exception ex) { pfs = ex.Message; }
+                        parts.Add(kv.Key % 100000 + ": " + n.CurrentPrimaryState + ", inertial " + n.HasInertialMotion + ", sector " + n.SectorManaged + ", docked " + n.IsDocked + ", journey " + n.HasJourney + ", path " + pfs + ", est " + (Motion.LeaveMM(kv.Key) >= 0 ? (Motion.LeaveMM(kv.Key) / 60000.0).ToString("0.0") + " h" : "-") + " (" + Motion.Describe(kv.Key) + ")");
+                    }
+                    c.details.Add("  +" + gh + " game h: " + open + " still here; " + string.Join(" | ", parts));
+                }
+                if (open == 0 && done.Count > 0 && done.Contains(s0.uid) && Time.realtimeSinceStartup - tr > 60) break;
+            }
+            foreach (var kv in watch) if (!done.Contains(kv.Key)) c.details.Add("still here at the end: " + kv.Value + (Motion.LeaveMM(kv.Key) >= 0 ? ", estimate " + (Motion.LeaveMM(kv.Key) / 60000.0).ToString("0.0") + " h" : ""));
+            MapManager.setLogicSpeed(1f); MapManager.pauseLogic();
+            c.summary = string.Join(" | ", c.details.FindAll(d => d.StartsWith("gone:") || d.StartsWith("spawn prediction")));
         }
 
         IEnumerator CaravanTest()

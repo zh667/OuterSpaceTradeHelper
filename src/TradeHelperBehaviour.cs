@@ -8,7 +8,7 @@ namespace TradeHelper
 {
     public class TradeHelperBehaviour : MonoBehaviour
     {
-        public const string Version = "0.7.0";
+        public const string Version = "0.8.0";
         public static TradeHelperBehaviour Instance;
 
         Config cfg;
@@ -209,6 +209,7 @@ namespace TradeHelper
         void Update()
         {
             var alloc = Perf.AllocBegin();
+            try { Motion.Tick(MarketScanner.Game, latest); } catch (Exception e) { Debug.LogWarning("[TradeHelper] motion: " + e.Message); }
             try { Ui.Tracker.Tick(); } catch (Exception e) { Debug.LogWarning("[TradeHelper] tracker: " + e.Message); Ui.Tracker.Stop(); }
             try
             {
