@@ -63,7 +63,7 @@ namespace TradeHelper
         // Session reset (another save loaded): forget everything.
         public void Clear()
         {
-            queue.Clear(); queued.Clear(); suppressed.Clear(); currentUid = -1; currentLeft = 0;
+            queue.Clear(); queued.Clear(); suppressed.Clear(); currentUid = -1; currentLeft = 0; keepDoneDay = -1;
             inFlightUid = -1; inFlightEx = null;
         }
 
@@ -79,6 +79,20 @@ namespace TradeHelper
             try { return ex.pendingSettlementDays != null ? ex.pendingSettlementDays.Count : 0; } catch { return 0; }
         }
 
+        public const long DayMM = 1440000L, HourMM = 60000L;
+        static long keepDoneDay = -1;
+        public static long GameHour(FWGameData gd) => (gd.elapsedMM % DayMM) / HourMM;
+
+        // "Keep up to date" catch-ups run when they owe a day, or once a game day at the hour the player chose.
+        static bool KeepFreshDue(FWGameData gd, Config cfg)
+        {
+            if (cfg.keepFreshHour < 0) return true;
+            long day = gd.elapsedMM / DayMM;
+            if (keepDoneDay == day || GameHour(gd) < cfg.keepFreshHour) return false;
+            keepDoneDay = day;
+            return true;
+        }
+
         public void Tick(Config cfg)
         {
             var gd = MarketScanner.Game;
@@ -86,7 +100,7 @@ namespace TradeHelper
             if (Time.unscaledTime >= nextKeepCheck)
             {
                 nextKeepCheck = Time.unscaledTime + 5f;
-                if (cfg.keepFresh.Count > 0)
+                if (cfg.keepFresh.Count > 0 && KeepFreshDue(gd, cfg))
                     foreach (var kv in MarketScanner.EnumerateExchanges(gd))
                     {
                         var ex = kv.Key;

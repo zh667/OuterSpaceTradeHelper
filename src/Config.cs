@@ -11,6 +11,9 @@ namespace TradeHelper
         public string hotkey = "F8";
         // Exchange uids the player chose to keep caught up in the background.
         public List<long> keepFresh = new List<long>();
+        // When the "keep up to date" stations are caught up: -1 = as soon as they owe a day (the game's day change);
+        // 0-23 = once a day at that game hour (the catch-up's stutter comes at a time the player chose).
+        public int keepFreshHour = -1;
         // Advice only uses markets that owe at most this many settlement days (0 = only up-to-date markets).
         public int maxStaleDays = 0;
         // Background catch-up budget: settle at most this many days per frame, stop early after this many ms.

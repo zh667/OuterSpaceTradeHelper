@@ -30,6 +30,8 @@ namespace TradeHelper
         public int ownedAtStart;
         public int state;                       // 0 = to buy, 1 = bought (holding), 2 = done
         public int boughtQty;
+        // Keep both stations caught up while the plan runs (on by default). Only the stations this plan added
+        // (addedKeepFresh) are released when it is done or removed; stations the player keeps up to date himself stay.
         public bool keepFresh = true;
         public List<long> addedKeepFresh = new List<long>();
         public List<PlanPoint> history = new List<PlanPoint>();
@@ -170,6 +172,15 @@ namespace TradeHelper
             }
             else ReleaseKeepFresh(p, cfg);
             cfg.Save();
+        }
+
+        // The player set this station's "keep up to date" himself (ticked or unticked it on the catch-up page): from now
+        // on it is his setting, so no plan releases it when it ends.
+        public static void ClaimKeepFresh(long uid)
+        {
+            bool changed = false;
+            foreach (var p in list) if (p.addedKeepFresh != null && p.addedKeepFresh.Remove(uid)) changed = true;
+            if (changed) Save();
         }
 
         // Undo only the "keep up to date" ticks this plan added, and only if no other open plan still needs them.
