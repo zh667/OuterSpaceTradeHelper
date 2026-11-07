@@ -335,7 +335,7 @@ namespace TradeHelper.Ui
             head.text = "<b>" + c.kind + "  " + c.name + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    还剩 " + Left(c.leftMM)
                 + "\n<size=13><color=#A4A5A6>商队资金 " + Fmt.Money(c.cash) + "  ·  税 " + (c.tax * 100).ToString("0") + "%（按来源站 " + c.source + "）  ·  价格系数 " + c.priceModifier + "%"
                 + (c.metPlayer ? "" : "（还没打过交道，按游戏默认）") + "：买它的货 ×" + c.FactorBuy.ToString("0.##") + "，卖给它 ×" + c.FactorSell.ToString("0.##")
-                + "\n怎么交易：舰队飞到它旁边，点它对话选交易；" + (c.black ? "可疑商队会主动靠近你搭话。卖给它的货不检查违禁。" : "敌对的商队不能交易。")
+                + "\n怎么交易：舰队飞到它旁边，点它对话选交易；" + (c.black ? "可疑商队会主动靠近你搭话。" : "") + "卖给商队的货不检查违禁。"
                 + (string.IsNullOrEmpty(c.priceNote) ? "" : "  <color=#D8982F>" + c.priceNote + "</color>") + "</color></size>";
             lines.SetData(c.lines);
         }

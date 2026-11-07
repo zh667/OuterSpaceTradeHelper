@@ -156,8 +156,12 @@ namespace TradeHelper
             }
             // The fleet's relation record with the player's fleet, read without creating one (FWFleet.getFleetRelation
             // adds a record when missing; a new record starts at priceModifier 150).
+            // The game prices with the relation on the fleet bound to the caravan's NPC (FWCaravan.getFleetDiscount ->
+            // getFleetCaravan()); dialogue price changes (ET_CSAPI.player_addpricemodifier) are written there too.
             FWFleetRelation rel = null;
-            var rd = cf.relationData;
+            FWFleet rf = null;
+            try { rf = car.getFleetCaravan(); } catch { }
+            var rd = (rf ?? cf).relationData;
             if (rd?.fleetRelations != null)
                 foreach (var r in rd.fleetRelations) if (r != null && r.fleetUid == playerUid) { rel = r; break; }
             c.metPlayer = rel != null;

@@ -213,8 +213,14 @@ namespace TradeHelper
                         if (buying) b.buy += ship.tempDisplayPrice; else b.sell += ship.tempDisplayPrice;
                         b.items.Add(new LedgerItem { key = key, name = goodsName(key) ?? "舰船", buy = buying, qty = 1, raw = ship.tempDisplayPrice });
                     }
-                foreach (var crew in h.BuyCrewCart) { double p = (float)mCrew.Invoke(page, new object[] { crew, true }); b.buy += p; b.items.Add(new LedgerItem { key = "crew", name = "人员", buy = true, qty = 1, raw = p }); }
-                foreach (var crew in h.SellCrewCart) { double p = (float)mCrew.Invoke(page, new object[] { crew, false }); b.sell += p; b.items.Add(new LedgerItem { key = "crew", name = "人员", buy = false, qty = 1, raw = p }); }
+                foreach (bool buying in new[] { true, false })
+                    foreach (var crew in buying ? h.BuyCrewCart : h.SellCrewCart)
+                    {
+                        double p = (float)mCrew.Invoke(page, new object[] { crew, buying });
+                        if (buying) b.buy += p; else b.sell += p;
+                        string key = Caravans.ItemKey(CrewDisplayInstance.Unwrap(crew) as FWBaseBean) ?? "crew";
+                        b.items.Add(new LedgerItem { key = key, name = goodsName(key) ?? "人员", buy = buying, qty = 1, raw = p });
+                    }
                 if (b.caravan)
                 {
                     // DoCaravanCheckout rounds the two totals once each; the price factor already holds the tax.

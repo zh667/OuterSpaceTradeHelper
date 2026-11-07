@@ -1116,6 +1116,45 @@ namespace TradeHelper
             yield return Refresh(); snap = host.Latest;
             c.details.Add("caught up " + need.Count + " source market(s)");
 
+            // Buy one crew goods (DNA / creature) from a caravan that sells one, through the crew cart.
+            {
+                var cc0 = snap.caravans.Find(x => x.present && x.lines.Exists(l => l.sells && IsCrewKey(l.key) && !double.IsNaN(l.unit) && l.unit < gd.creditPoint / 2));
+                if (cc0 == null) c.details.Add("no caravan sells crew goods here: crew checkout not tested");
+                else
+                {
+                    var cl = cc0.lines.Find(l => l.sells && IsCrewKey(l.key) && !double.IsNaN(l.unit) && l.unit < gd.creditPoint / 2);
+                    PageTradeInventory page = null; CaravanTransferHandler h = null; bool put = false;
+                    Locked(() =>
+                    {
+                        var cf = FindCaravanFleet(gd, cc0.uid);
+                        var fc = new FleetInventoryContext(AirShipLocalData.Instance.getCurFleet(), false);
+                        var cc = new CaravanInventoryContext(cf);
+                        h = new CaravanTransferHandler(cc, fc);
+                        page = UIHelp.showPageTradeInventoryFleet();
+                        page.InitData(cc, fc, h);
+                        foreach (var cr in cc.GetCrew())
+                            if (Caravans.ItemKey(CrewDisplayInstance.Unwrap(cr) as FWBaseBean) == cl.key) { put = h.HandleCrewTransfer(cr, PanelRole.ShopSystem, h.CurrentPlayerRole); break; }
+                    });
+                    yield return new WaitForSecondsRealtime(1.5f);
+                    yield return Shot("crew-trade-page");
+                    int n0 = Ledger.entries.Count; long cp0 = gd.creditPoint;
+                    Locked(() => DoCheckout.Invoke(page, null));
+                    yield return null; yield return null;
+                    var e = Ledger.entries.Count > n0 ? Ledger.entries[Ledger.entries.Count - 1] : null;
+                    long d = gd.creditPoint - cp0, expect = -FWTradePricePressure.RoundPayment(cl.unit, true);
+                    bool crewOk = put && h.BuyCrewCart.Count == 0 && d == expect && e != null && e.exact && e.creditDelta == d && e.items.Exists(x => x.buy && x.key == cl.key && x.name == cl.name);
+                    c.details.Add("crew checkout at " + cc0.name + ": buy " + cl.name + " (" + cl.key + "), in cart " + put + ", credits " + d + ", mod predicted " + expect
+                                  + ", ledger " + (e == null ? "none" : e.creditDelta + " exact=" + e.exact + " " + string.Join("; ", e.items.ConvertAll(x => x.name + "[" + x.key + "] x" + x.qty + " " + x.net.ToString("0.0")))) + (crewOk ? " ok" : " WRONG"));
+                    ok &= crewOk;
+                    Locked(() => page.RequestClose());
+                    yield return Refresh(); snap = host.Latest;
+                    var after = snap.caravans.Find(x => x.uid == cc0.uid);
+                    var l2 = after?.lines.Find(l => l.sells && l.key == cl.key);
+                    c.details.Add("its stock of " + cl.name + " " + cl.qty + " -> " + (l2 == null ? 0 : l2.qty));
+                    ok &= (l2 == null ? 0 : l2.qty) == cl.qty - 1;
+                }
+            }
+
             foreach (var nat in snap.caravans.FindAll(x => x.present && x.black))
             {
                 int cmp = 0, dif = 0; string s = null;
@@ -1143,6 +1182,22 @@ namespace TradeHelper
                 if (pass == 2) ok &= cmp > 0 && dif == 0;
                 yield return Refresh(); snap = host.Latest;
                 ci = snap.caravans.Find(x => x.uid == ci.uid) ?? ci;
+            }
+
+            // A dialogue that changes the caravan's prices (the game's own effect, ET_CSAPI.player_addpricemodifier):
+            // the mod must follow and still equal the game's page.
+            {
+                int pm0 = ci.priceModifier; bool okApi = false;
+                long npc = -1;
+                // The dialogue passes the NPC's uid (FWCaravan.NpcUid), not the fleet's.
+                Locked(() => { npc = FindCaravanFleet(gd, ci.uid).getCaravan().NpcUid; okApi = ET_CSAPI.player_addpricemodifier(npc.ToString(), -40); });
+                yield return Refresh(); snap = host.Latest;
+                ci = snap.caravans.Find(x => x.uid == ci.uid) ?? ci;
+                int cmp = 0, dif = 0; string s = null;
+                Locked(() => s = ComparePrices(gd, ci, out cmp, out dif));
+                bool pmOk = okApi && ci.priceModifier == pm0 - 40 && cmp > 0 && dif == 0;
+                c.details.Add("dialogue price change -40 (npc " + npc + "): game api " + okApi + ", mod price modifier " + pm0 + " -> " + ci.priceModifier + " (buy x" + ci.FactorBuy.ToString("0.###") + ", sell x" + ci.FactorSell.ToString("0.###") + "); prices " + cmp + " compared, " + dif + " differ: " + s + (pmOk ? " ok" : " WRONG"));
+                ok &= pmOk;
             }
 
             // UI
