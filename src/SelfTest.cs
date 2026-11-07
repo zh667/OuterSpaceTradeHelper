@@ -167,6 +167,12 @@ namespace TradeHelper
                 Finish(null);
                 yield break;
             }
+            if (req.tests == "screens")
+            {
+                yield return Guard(WorkshopScreens(), "workshop screenshots");
+                Finish(null);
+                yield break;
+            }
             if (req.tests == "perf")
             {
                 yield return Guard(PerfRun(), "performance run (measurement)");
@@ -1169,6 +1175,31 @@ namespace TradeHelper
             ok &= bad == 0;
             s = string.Join("; ", sb);
             return ok;
+        }
+
+        // Screenshots for the Workshop page: the advice page (all categories), the markets page, and the caravans page in
+        // the galaxy view with a caravan picked.
+        IEnumerator WorkshopScreens()
+        {
+            var c = new Check { name = "workshop screenshots", info = true, passed = true };
+            result.checks.Add(c);
+            host.SetVisible(true); host.ShowTab(0);
+            yield return Refresh();
+            yield return new WaitForSecondsRealtime(2);
+            yield return Shot("ws-advice");
+            host.ShowTab(3);
+            yield return new WaitForSecondsRealtime(2);
+            yield return Shot("ws-markets");
+            host.SetVisible(false);
+            try { MainUI_Head.GoGalaxyFleet(); } catch (Exception e) { c.details.Add("galaxy view: " + e.Message); }
+            yield return new WaitForSecondsRealtime(12);
+            yield return Refresh();
+            host.SetVisible(true); host.ShowTab(4);
+            var pick = host.Latest?.caravans.Find(x => x.present && !x.black) ?? host.Latest?.caravans.Find(x => x.present);
+            if (pick != null) Ui.CaravansView.Current?.Select(pick.uid);
+            yield return new WaitForSecondsRealtime(2);
+            yield return Shot("ws-caravans");
+            c.summary = "advice " + (host.Latest?.trades.Count ?? 0) + " routes; caravan " + (pick != null ? pick.FullName : "none");
         }
 
         // Normal play for the performance log: the clock at x3 (as the player plays) with the panel closed, then open on

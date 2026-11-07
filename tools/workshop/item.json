@@ -1,0 +1,10 @@
+{
+  "comment": "Steam Workshop page of the mod (tools/workshop.py). The published id is kept in published_id.txt next to this file.",
+  "appId": 3080070,
+  "title": "跑商助手",
+  "language": "schinese",
+  "tags": ["Mod"],
+  "content": "dist/TradeHelper",
+  "preview": "local/workshop/preview.jpg",
+  "descriptionFile": "tools/workshop/description.txt"
+}

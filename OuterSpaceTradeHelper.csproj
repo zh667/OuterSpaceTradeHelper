@@ -18,6 +18,10 @@
     <GameManaged Condition="'$(GameManaged)' == ''">E:\SteamLibrary\steamapps\common\Outer Space\Outer Space_Data\Managed</GameManaged>
   </PropertyGroup>
   <ItemGroup>
+    <!-- tools/ holds the Workshop uploader (its own project); keep it out of the mod. -->
+    <Compile Remove="tools/**;bin/**;obj/**;local/**" />
+  </ItemGroup>
+  <ItemGroup>
     <Reference Include="mscorlib"><HintPath>$(GameManaged)\mscorlib.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="System"><HintPath>$(GameManaged)\System.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="System.Core"><HintPath>$(GameManaged)\System.Core.dll</HintPath><Private>false</Private></Reference>

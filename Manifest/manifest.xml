@@ -3,7 +3,7 @@
   <packageId>zh6657.tradehelper</packageId>
   <name>跑商助手</name>
   <author>zh6657</author>
-  <desc>空间站实时价格、税率、库存；基地/母舰/舰队库存汇总；扣税后的跑商与卖货建议（可排序、筛选）；可选择让指定空间站在后台补算或初始化市场。热键 F8。除你在“后台补算”页主动选择的站外，不改动任何游戏数据。</desc>
+  <desc>跑商工具：各站实时价格、税率、库存；扣税后的跑商建议和卖库存建议；跑商计划自动跟踪买卖；NPC 商队和黑潮走私船的买卖价、追踪、走私船刷新预测和出生点；结账记录。热键 F8。除你在“后台补算”页主动选择的站外，不改动任何游戏数据。</desc>
   <versions>
     <ModMetaVersion>
       <version>v_common</version>
