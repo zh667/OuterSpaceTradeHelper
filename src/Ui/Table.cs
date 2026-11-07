@@ -40,7 +40,8 @@ namespace TradeHelper.Ui
         public readonly List<T> view = new List<T>();
 
         const float RowH = 30f, HeadH = 32f;
-        readonly RectTransform root, content, viewport;
+        readonly RectTransform root, content, viewport, track;
+        readonly float maxH;
         readonly ScrollRect scroll;
         readonly List<RowUi> rows = new List<RowUi>();
         readonly List<TextMeshProUGUI> headers = new List<TextMeshProUGUI>();
@@ -112,7 +113,8 @@ namespace TradeHelper.Ui
             scroll.movementType = ScrollRect.MovementType.Clamped; scroll.scrollSensitivity = 45; scroll.inertia = false;
             scroll.onValueChanged.AddListener(_ => Bind());
             // Scrollbar like the game's: track #535657, handle #75777A.
-            var track = Kit.Place(Kit.New("Scrollbar", root), w - 8, HeadH + 3, 6, h - HeadH - 5);
+            track = Kit.Place(Kit.New("Scrollbar", root), w - 8, HeadH + 3, 6, h - HeadH - 5);
+            maxH = h;
             var trackImg = Kit.Img(track, Theme.Box, Theme.Line, true);
             var area = Kit.Stretch(Kit.New("Sliding Area", track));
             var handle = Kit.Stretch(Kit.New("Handle", area));
@@ -151,6 +153,7 @@ namespace TradeHelper.Ui
         // For the self-test: the columns' total width and the room they have.
         public float ColumnsWidth { get { float s = 0; foreach (var c in columns) s += c.width; return s; } }
         public float Width => root.rect.width;
+        public float Height => root.sizeDelta.y;
         public int RowCount => view.Count;
 
         static bool IsFlex(Column<T> c) => c.buttonText == null && c.checkGet == null && !c.numeric && !string.IsNullOrEmpty(c.title);
@@ -188,6 +191,7 @@ namespace TradeHelper.Ui
                     // KodeMono may lack the ellipsis glyph; cut numbers cleanly instead of letting them spill over.
                     if (c.numeric) t.overflowMode = TextOverflowModes.Truncate;
                     Kit.Place(t.rectTransform, cx + 4, 0, c.width - 8, RowH);
+                    Kit.Tip(t);
                     r.cells[i] = t;
                 }
                 cx += c.width;
@@ -318,5 +322,15 @@ namespace TradeHelper.Ui
         }
 
         public void SetActive(bool on) => root.gameObject.SetActive(on);
+
+        // Shrink or grow the table (never beyond the height it was built with: rows are pooled for that).
+        public void SetHeight(float h)
+        {
+            h = Mathf.Min(h, maxH);
+            root.sizeDelta = new Vector2(root.sizeDelta.x, h);
+            viewport.sizeDelta = new Vector2(viewport.sizeDelta.x, h - HeadH - 1);
+            track.sizeDelta = new Vector2(track.sizeDelta.x, h - HeadH - 5);
+            Bind();
+        }
     }
 }

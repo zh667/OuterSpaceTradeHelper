@@ -1005,12 +1005,17 @@ namespace TradeHelper
             {
                 if (double.IsNaN(l.unit)) { sb.Add(l.name + " not priced (" + l.note + ")"); continue; }
                 var t = l.sells ? FindThing(cf.getCaravan().allGoods, l.key) : FindThing(hold.ConvertAll(x => (FWBaseBean)x), l.key);
+                if (t == null && !l.sells && l.qty == 0)
+                {
+                    var p = l.key.Split(new[] { '_' }, 2);
+                    t = new FWThingBean { type = int.Parse(p[0]), id = p[1], sum = 1 };
+                }
                 if (t == null) { sb.Add(l.name + " item not found"); continue; }
                 double g;
                 try { g = l.sells ? cc.GetSellUnitPrice(t) : cc.GetPurchaseUnitPrice(t); }
                 catch (Exception e) { sb.Add(l.name + " game price failed: " + e.Message); differ++; continue; }
                 compared++;
-                bool same = Math.Abs(g - l.unit) <= Math.Max(0.01, Math.Abs(g) * 1e-5);
+                bool same = Math.Abs(g - l.unit) <= Math.Max(0.01, Math.Abs(g) * 1e-6);   // the page's unit is a float
                 if (!same) differ++;
                 if (!same || sb.Count < 6) sb.Add((l.sells ? "sells " : "buys ") + l.name + " mod " + l.unit.ToString("0.00") + " game " + g.ToString("0.00") + (same ? "" : " DIFF"));
             }
@@ -1023,7 +1028,7 @@ namespace TradeHelper
         {
             var gd = MarketScanner.Game;
             PageTradeInventory page = null; CaravanTransferHandler h = null; CaravanInventoryContext cc = null; FleetInventoryContext fc = null;
-            int nb = 0, ns = 0;
+            int nb = 0, ns = 0; bool factorsSame = false;
             Locked(() =>
             {
                 var cf = FindCaravanFleet(gd, ci.uid);
@@ -1037,18 +1042,62 @@ namespace TradeHelper
             });
             yield return new WaitForSecondsRealtime(1.5f);
             yield return Shot(ci.black ? "smuggler-trade-page" : "caravan-trade-page");
+            {
+                // Exact numbers: the mod's units, the game's page units and the cart's own quote.
+                string g = null;
+                Locked(() =>
+                {
+                    var parts = new List<string>();
+                    if (buy != null) { var t = FindThing(FindCaravanFleet(gd, ci.uid).getCaravan().allGoods, buy.key); parts.Add("buy mod " + buy.unit.ToString("0.000000") + " game " + (t == null ? "?" : cc.GetSellUnitPrice(t).ToString("0.000000"))); }
+                    if (sell != null) { var t = FindThing(gd.galaxyBlock.playerFleet.getThings().ConvertAll(x => (FWBaseBean)x), sell.key); parts.Add("sell mod " + sell.unit.ToString("0.000000") + " game " + (t == null ? "?" : cc.GetPurchaseUnitPrice(t).ToString("0.000000"))); }
+                    parts.Add("factor buy " + cc.GetPriceFactor(true).ToString("0.0000000000") + " mod " + ci.FactorBuy.ToString("0.0000000000") + ", sell " + cc.GetPriceFactor(false).ToString("0.0000000000") + " mod " + ci.FactorSell.ToString("0.0000000000"));
+                    factorsSame = cc.GetPriceFactor(true) == ci.FactorBuy && cc.GetPriceFactor(false) == ci.FactorSell;
+                    g = string.Join("; ", parts);
+                });
+                c.details.Add("exact: " + g + (factorsSame ? " (factors identical)" : " FACTORS DIFFER"));
+            }
             int n0 = Ledger.entries.Count; long cp0 = gd.creditPoint;
             Locked(() => DoCheckout.Invoke(page, null));
             yield return null; yield return null;
             var e = Ledger.entries.Count > n0 ? Ledger.entries[Ledger.entries.Count - 1] : null;
             long d = gd.creditPoint - cp0;
             long expect = (sell != null ? FWTradePricePressure.RoundPayment(sell.unit, false) : 0) - (buy != null ? FWTradePricePressure.RoundPayment(buy.unit, true) : 0);
-            bool ok = (buy == null || nb == 1) && (sell == null || ns == 1) && d == expect && e != null && e.exact && e.creditDelta == d && e.market != null && e.market.Contains(ci.name);
+            bool ok = factorsSame && (buy == null || nb == 1) && (sell == null || ns == 1) && d == expect && e != null && e.exact && e.creditDelta == d && e.market != null && e.market.Contains(ci.name);
             c.details.Add((ci.black ? "smuggler" : "caravan") + " checkout: buy " + (buy?.name ?? "-") + " x" + nb + ", sell " + (sell?.name ?? "-") + " x" + ns + ", credits " + d + ", mod predicted " + expect
-                          + ", ledger " + (e == null ? "none" : e.market + " " + e.creditDelta + " exact=" + e.exact + " " + string.Join("; ", e.items.ConvertAll(x => x.name + " x" + x.qty + " " + x.net.ToString("0.0")))) + (ok ? " ok" : " WRONG"));
+                          + ", ledger " + (e == null ? "none" : e.market + " " + e.creditDelta + " exact=" + e.exact + " " + string.Join("; ", e.items.ConvertAll(x => x.name + " x" + x.qty + " raw " + x.raw.ToString("0.000000") + " net " + x.net.ToString("0.000000")))) + (ok ? " ok" : " WRONG"));
             Locked(() => page.RequestClose());
             yield return new WaitForSecondsRealtime(0.5f);
             done(ok);
+        }
+
+        // A smuggler as the mod shows it: the dialogue's deals as parsed from the game's trigger scripts, and for the
+        // hold sale, each listed goods counted the way the dialogue counts it (Global.Player.GetItemCount(type, id, 1) =
+        // the fleet's grouped things) and paid base x rate.
+        static bool CheckSmuggler(FWGameData gd, CaravanInfo si, out string s)
+        {
+            var d = Caravans.Deals();
+            var sb = new List<string>();
+            bool ok = si.smuggler && si.kind == "可疑商队" && d.error == null && d.sells.Count >= 3 && d.buys.Count > 20 && d.rate > 0;
+            sb.Add("deals: " + string.Join(", ", d.sells.ConvertAll(o => o.type + "_" + o.id + " x" + o.count + " for " + o.cost + (o.once != null ? " once" : ""))) + "; buys " + d.buys.Count + " goods x" + d.rate + " once=" + d.buyOnce);
+            ok &= si.lines.FindAll(l => l.sells).Count == d.sells.Count;
+            var fleet = AirShipLocalData.Instance.getCurFleet();
+            int listed = 0, held = 0, bad = 0;
+            foreach (var kv in d.buys)
+            {
+                listed++;
+                var p = kv.Key.Split(new[] { '_' }, 2);
+                int n = 0;
+                try { n = fleet.getThingBeanByTypeId_Group(int.Parse(p[0]), p[1], false)?.getSum() ?? 0; } catch { }
+                var line = si.lines.Find(l => !l.sells && l.key == kv.Key);
+                int shown = line == null ? 0 : line.qty;
+                if (n > 0) held++;
+                bool same = shown == n && (line == null || Math.Abs(line.unit - kv.Value * d.rate) < 0.01);
+                if (!same) { bad++; sb.Add("hold " + kv.Key + " game " + n + " mod " + shown + (line != null ? " unit " + line.unit + " total " + line.total : "")); }
+            }
+            sb.Add("hold sale: " + held + " of " + listed + " listed goods in the hold, total " + si.smugglerSaleTotal + ", " + bad + " differ");
+            ok &= bad == 0;
+            s = string.Join("; ", sb);
+            return ok;
         }
 
         IEnumerator CaravanTest()
@@ -1076,6 +1125,23 @@ namespace TradeHelper
                 + " pm " + x.priceModifier + (x.metPlayer ? "" : "(no record)") + " rel " + x.relation + " tax " + x.tax.ToString("0.###") + " source " + x.source + " priced " + x.priced
                 + " lines " + x.lines.FindAll(l => l.sells).Count + " sell/" + x.lines.FindAll(l => !l.sells).Count + " buy " + x.priceNote;
             c.details.Add("caravans in save " + expected + ", mod lists " + snap.caravans.Count + ": " + string.Join(" | ", snap.caravans.ConvertAll(x => desc(x))));
+            // Fleets spawn and leave while the game runs: compare counts taken right after a fresh scan, a few times.
+            for (int tries = 0; tries < 4 && expected != snap.caravans.Count; tries++)
+            {
+                yield return Refresh(); snap = host.Latest;
+                expected = 0;
+                Locked(() =>
+                {
+                    foreach (var f in gd.factionFleetRepository)
+                    {
+                        if (f == null || f.resultSettled) continue;
+                        bool has = ((f.fleet ?? f.materializedState) as FWCaravanFleet)?.getCaravan() != null;
+                        int t = f.runtimeFleetTypeOverride >= 0 && f.runtimeFleetTypeOverride < 11 ? f.runtimeFleetTypeOverride : (ImplDef<G_ForceFleetType_Def>.getDataID(f.gForceFleetTypeResId)?.ActivityType ?? -1);
+                        if (has || t == (int)GalaxyNPCFleetType.Trade || t == (int)GalaxyNPCFleetType.Smuggler) expected++;
+                    }
+                });
+                c.details.Add("recount after a fresh scan: save " + expected + ", mod " + snap.caravans.Count);
+            }
             ok &= expected == snap.caravans.Count;
             if (snap.caravans.Count == 0) { c.passed = false; c.summary = "no caravan in the test save"; yield break; }
             // Caravans get their goods when the game puts them in the scene: open the galaxy the fleet is in, as the
@@ -1096,6 +1162,21 @@ namespace TradeHelper
                 yield return Shot("galaxy-scene");
                 c.details.Add("after opening the galaxy: " + string.Join(" | ", snap.caravans.ConvertAll(x => desc(x))));
             }
+            // How the trade-type fleets sit in the scene (diagnostic).
+            Locked(() =>
+            {
+                foreach (var f in gd.factionFleetRepository)
+                {
+                    if (f == null || f.resultSettled) continue;
+                    int t = f.runtimeFleetTypeOverride >= 0 && f.runtimeFleetTypeOverride < 11 ? f.runtimeFleetTypeOverride : (ImplDef<G_ForceFleetType_Def>.getDataID(f.gForceFleetTypeResId)?.ActivityType ?? -1);
+                    if (t != (int)GalaxyNPCFleetType.Trade && t != (int)GalaxyNPCFleetType.Smuggler) continue;
+                    GalaxyNPCFleetType rt; string why;
+                    bool resolved = FleetPlayerAntiDisturbService.TryResolveType(f.fleet ?? f.materializedState, out rt, out why);
+                    c.details.Add("fleet " + f.Name + " uid " + f.uid + " galaxy " + f.galaxyId + ": scene object " + (f.fleet == null ? "none" : f.fleet.GetType().Name) + ", kept " + (f.materializedState == null ? "none" : f.materializedState.GetType().Name)
+                        + ", caravan " + (((f.fleet ?? f.materializedState) as FWCaravanFleet)?.getCaravan() != null) + ", presence " + f.presenceMode + ", docked " + f.dockedSpaceportUid + ", journey " + (f.journey != null)
+                        + ", target " + f.activityTargetKey + ", type " + (resolved ? rt.ToString() : "? " + why) + ", appear in " + ((f.activityAppearTime - gd.elapsedMM) / 60000) + " h");
+                }
+            });
             if (!snap.caravans.Exists(x => x.present)) { c.passed = false; c.summary = "no caravan came into the scene"; yield break; }
 
             // Their source markets up to date (the mod prices normal goods only then).
@@ -1118,7 +1199,7 @@ namespace TradeHelper
 
             // Buy one crew goods (DNA / creature) from a caravan that sells one, through the crew cart.
             {
-                var cc0 = snap.caravans.Find(x => x.present && x.lines.Exists(l => l.sells && IsCrewKey(l.key) && !double.IsNaN(l.unit) && l.unit < gd.creditPoint / 2));
+                var cc0 = snap.caravans.Find(x => x.present && !x.smuggler && x.lines.Exists(l => l.sells && IsCrewKey(l.key) && !double.IsNaN(l.unit) && l.unit < gd.creditPoint / 2));
                 if (cc0 == null) c.details.Add("no caravan sells crew goods here: crew checkout not tested");
                 else
                 {
@@ -1155,12 +1236,12 @@ namespace TradeHelper
                 }
             }
 
-            foreach (var nat in snap.caravans.FindAll(x => x.present && x.black))
+            foreach (var nat in snap.caravans.FindAll(x => x.black))
             {
-                int cmp = 0, dif = 0; string s = null;
-                Locked(() => s = ComparePrices(gd, nat, out cmp, out dif));
-                c.details.Add("smuggler the game spawned: " + desc(nat) + "; sells " + string.Join(", ", nat.lines.FindAll(l => l.sells).ConvertAll(l => l.name + "x" + l.qty + (l.contraband ? "(违禁)" : "") + " " + l.unit.ToString("0"))) + "; prices " + cmp + " compared, " + dif + " differ: " + s);
-                ok &= dif == 0;
+                bool r = false; string s = null;
+                Locked(() => r = CheckSmuggler(gd, nat, out s));
+                c.details.Add("smuggler the game spawned: " + desc(nat) + "; " + s + (r ? " ok" : " WRONG"));
+                ok &= r;
                 host.SetVisible(true); host.ShowTab(4);
                 yield return new WaitForSecondsRealtime(0.5f);
                 Ui.CaravansView.Current?.Select(nat.uid);
@@ -1168,8 +1249,10 @@ namespace TradeHelper
                 yield return Shot("smuggler-spawned");
                 host.SetVisible(false);
             }
-            var ci = snap.caravans.Find(x => x.present && x.priced && !x.hostile && x.lines.Exists(l => l.sells && !double.IsNaN(l.unit))) ?? snap.caravans.Find(x => x.present && x.priced);
-            if (ci == null) { c.passed = false; c.summary = "no caravan could be priced"; yield break; }
+            var ci = snap.caravans.Find(x => x.present && !x.smuggler && x.priced && !x.hostile && x.lines.Exists(l => l.sells && !double.IsNaN(l.unit))) ?? snap.caravans.Find(x => x.present && !x.smuggler && x.priced);
+            if (ci == null) c.details.Add("no ordinary caravan in the scene now: trade-page price and checkout checks not run this time");
+            if (ci != null)
+            {
             c.details.Add("picked: " + desc(ci));
 
             // Prices against the game's page. The game's getFleetRelation creates the relation record on first use; the
@@ -1207,6 +1290,47 @@ namespace TradeHelper
             Ui.CaravansView.Current?.Select(ci.uid);
             yield return new WaitForSecondsRealtime(1f);
             yield return Shot("caravans");
+            {
+                // Hover a cut-off cell: the tip box must show its whole text.
+                Ui.TipOnHover pick = null;
+                foreach (var t in host.CanvasGo.GetComponentsInChildren<Ui.TipOnHover>(false))
+                    if (Ui.TipOnHover.CutShort(t.text)) { pick = t; break; }
+                if (pick == null) c.details.Add("tooltip: no cut-off text on this page");
+                else
+                {
+                    var cr = pick.text.rectTransform; var corners = new Vector3[4]; cr.GetWorldCorners(corners);
+                    var ev = new UnityEngine.EventSystems.PointerEventData(UnityEngine.EventSystems.EventSystem.current) { position = (corners[0] + corners[2]) / 2 };
+                    pick.OnPointerEnter(ev);
+                    yield return new WaitForSecondsRealtime(0.5f);
+                    yield return Shot("tooltip");
+                    bool tipOk = Ui.Tooltip.Visible && Ui.Tooltip.Text == pick.text.text;
+                    c.details.Add("tooltip over \"" + pick.text.text + "\": shown " + Ui.Tooltip.Visible + (tipOk ? " ok" : " WRONG"));
+                    ok &= tipOk;
+                    pick.OnPointerExit(ev);
+                }
+            }
+            {
+                // Plans page: no plan picked -> no detail box, table takes the room.
+                host.ShowTab(1);
+                yield return new WaitForSecondsRealtime(0.5f);
+                var pv = Ui.PlansView.Current;
+                if (pv != null)
+                {
+                    pv.Select(null);
+                    yield return new WaitForSecondsRealtime(0.3f);
+                    float h0 = pv.TableForTest.Height;
+                    var any = Plans.list.Count > 0 ? Plans.list[0] : null;
+                    Plan temp = null;
+                    if (any == null && snap.trades.Count > 0) { Locked(() => temp = Plans.FromTrade(snap.trades[0], snap, host.Cfg, host.settlement)); any = temp; }
+                    float h1 = h0;
+                    if (any != null) { pv.Select(any); yield return new WaitForSecondsRealtime(0.3f); h1 = pv.TableForTest.Height; yield return Shot("plans-detail"); pv.Select(null); yield return new WaitForSecondsRealtime(0.3f); }
+                    float h2 = pv.TableForTest.Height;
+                    if (temp != null) Locked(() => Plans.Remove(temp, host.Cfg));
+                    bool planUi = any != null && h0 > h1 && h2 == h0;
+                    c.details.Add("plans page table height: none picked " + h0 + ", one picked " + h1 + ", closed again " + h2 + (planUi ? " ok" : " WRONG"));
+                    ok &= planUi;
+                }
+            }
             host.SetVisible(false);
 
             // A real checkout: buy one unit, and sell one unit of something it takes from the hold.
@@ -1229,78 +1353,86 @@ namespace TradeHelper
                 }
             }
 
-            // Suspicious caravan (smuggler fleet): the save has none, so this test copy gives the picked caravan fleet a
-            // black-market caravan made by the game (FWExchangeSpace.createBlackMarketCaravan, as a smuggler spawn does),
-            // from a market that bans something.
-            FWCaravan original = null, black = null; string made = null;
+            }
+
+            // A smuggler: the one the game spawned if there is one, else made by the game on the picked fleet
+            // (FWExchangeSpace.createBlackMarketCaravan, as a smuggler
+            // spawn does): the mod must show the smuggler dialogue's deals, count the hold the way the dialogue does, and
+            // notice a deal already made (the dialogue's ET record).
+            FWCaravan original = null, black = null;
             var cfl = (FWCaravanFleet)null;
+            var natural = snap.caravans.Find(x => x.present && x.smuggler);
+            var host0 = natural ?? ci;
             Locked(() =>
             {
-                cfl = FindCaravanFleet(gd, ci.uid);
-                original = cfl.getCaravan();
-                var srcs = new List<FWExchangeSpace>();
-                var os = original.getSourceExchangeSpace(); if (os != null) srcs.Add(os);
-                foreach (var m in snap.markets) if (m.Exact && !m.planet && m.ex != null && m.goods.Exists(q => q.contraband) && !srcs.Contains(m.ex)) srcs.Add(m.ex);
-                foreach (var ex in srcs)
+                if (host0 == null) return;
+                cfl = FindCaravanFleet(gd, host0.uid);
+                original = cfl?.getCaravan();
+                if (original == null) return;
+                if (natural != null) { black = original; return; }
+                var ex = original.getSourceExchangeSpace();
+                if (ex != null)
                 {
-                    var bc = ex.createBlackMarketCaravan("0", gd.elapsedMM, null, gd);
-                    int n = 0; foreach (var g in bc.allGoods) if (g is FWThingBean t && t.getSum() > 0) n++;
-                    if (n == 0) continue;
-                    bc.NpcUid = original.NpcUid;
-                    black = bc;
-                    made = "from " + (snap.markets.Find(m => m.ex == ex)?.name ?? ex.uid.ToString()) + ": " + n + " goods, cash " + bc.cp;
-                    break;
+                    black = ex.createBlackMarketCaravan("0", gd.elapsedMM, null, gd);
+                    black.NpcUid = original.NpcUid;
+                    cfl.caravan = black;
                 }
-                if (black != null) cfl.caravan = black;
             });
-            if (black == null) { c.details.Add("no market here makes a black-market caravan with goods"); ok = false; }
+            if (host0 != null) ci = host0;
+            if (black == null) { c.details.Add("could not make a black-market caravan"); ok = false; }
             else
             {
-                c.details.Add("smuggler made " + made);
+                // Put a few listed goods in the fleet's hold with the dialogue's own item call (Player.AddItem, to the fleet):
+                // a stackable goods and weapons (one stack per piece), so the count is checked across stacks.
+                Locked(() => { ET_CSAPI.player_additem(3, 12, "9", 1); ET_CSAPI.player_additem(2, 551, "17", 1); ET_CSAPI.player_additem(1, 551, "17", 1); });
                 yield return Refresh(); snap = host.Latest;
                 var si = snap.caravans.Find(x => x.uid == ci.uid);
-                bool shown = si != null && si.black && si.kind == "可疑商队" && si.lines.Exists(l => l.sells) && si.lines.FindAll(l => l.sells).TrueForAll(l => l.contraband);
-                c.details.Add("mod shows: " + (si == null ? "nothing" : desc(si) + "; sells " + string.Join(", ", si.lines.FindAll(l => l.sells).ConvertAll(l => l.name + (l.contraband ? "(违禁)" : "") + " " + l.unit.ToString("0") + " best station " + (l.bestName ?? "none")))) + (shown ? " ok" : " WRONG"));
-                ok &= shown;
-                if (si != null)
+                bool r = false; string s = null;
+                Locked(() => r = si != null && CheckSmuggler(gd, si, out s) && si.smugglerSaleKinds >= 2);
+                c.details.Add((natural != null ? "smuggler the game spawned, " : "smuggler made on ") + ci.name + ": " + (si == null ? "not listed" : desc(si) + "; " + s) + (r ? " ok" : " WRONG"));
+                ok &= r;
+                // The hold sale's own steps (IllegalFleet-SellContraband), with the game functions its Lua calls:
+                // before = GetItemCount(t, id, 1); AddItem(-before, t, id, 1); after = GetItemCount(...);
+                // removed = min(before, before - after) is what gets paid. Report what leaves the hold and what is paid.
+                foreach (var key in new[] { "12_9", "551_17" })
                 {
-                    int cmp = 0, dif = 0; string s = null;
-                    Locked(() => s = ComparePrices(gd, si, out cmp, out dif));
-                    c.details.Add("smuggler prices: " + cmp + " compared, " + dif + " differ: " + s);
-                    ok &= cmp > 0 && dif == 0;
-                    host.SetVisible(true);
-                    host.ShowTab(4);
-                    yield return new WaitForSecondsRealtime(0.5f);
-                    Ui.CaravansView.Current?.Select(si.uid);
-                    yield return new WaitForSecondsRealtime(1f);
-                    yield return Shot("smuggler");
-                    host.SetVisible(false);
-                    // Buy one contraband unit; then sell it back if the smuggler takes it.
-                    var b2 = si.lines.Find(l => l.sells && !IsCrewKey(l.key) && !double.IsNaN(l.unit) && l.unit < gd.creditPoint / 2);
-                    if (b2 != null)
+                    var p = key.Split('_');
+                    int ty = int.Parse(p[0]); string id = p[1];
+                    int heldBefore = 0, heldAfter = 0, before = 0, after = 0;
+                    Locked(() =>
                     {
-                        bool r = false;
-                        yield return CaravanCheckout(c, si, b2, null, v => r = v);
-                        ok &= r;
-                        yield return Refresh(); snap = host.Latest;
-                        si = snap.caravans.Find(x => x.uid == ci.uid);
-                        var s2 = si?.lines.Find(l => !l.sells && l.key == b2.key && !double.IsNaN(l.unit));
-                        c.details.Add("smuggler takes back " + b2.name + ": " + (s2 != null ? "yes" : "no (not on its purchase list)"));
-                        if (s2 != null)
-                        {
-                            r = false;
-                            yield return CaravanCheckout(c, si, null, s2, v => r = v);
-                            ok &= r;
-                        }
-                        else
-                        {
-                            // Something it does take from the hold, to sell to a smuggler at least once.
-                            var s3 = si?.lines.Find(l => !l.sells && !double.IsNaN(l.unit) && l.unit <= si.cash);
-                            if (s3 != null) { r = false; yield return CaravanCheckout(c, si, null, s3, v => r = v); ok &= r; }
-                        }
-                    }
-                    else { c.details.Add("smuggler: nothing priced to buy"); ok = false; }
+                        foreach (var t in gd.galaxyBlock.playerFleet.getThings()) if (t != null && t.type == ty && t.id == id) heldBefore += t.getSum();
+                        before = ET_CSAPI.global_player_getitemcount(ty, id, 1);
+                        ET_CSAPI.player_additem(-before, ty, id, 1);
+                        after = ET_CSAPI.global_player_getitemcount(ty, id, 1);
+                        foreach (var t in gd.galaxyBlock.playerFleet.getThings()) if (t != null && t.type == ty && t.id == id) heldAfter += t.getSum();
+                    });
+                    int removed = Math.Max(0, Math.Min(before, before - after));
+                    var ml = si?.lines.Find(l => !l.sells && l.key == key);
+                    double basePrice = Caravans.Deals().buys.Find(b => b.Key == key).Value * Caravans.Deals().rate;
+                    bool stepOk = ml != null && ml.qty == heldBefore - heldAfter && Math.Abs(ml.total - Math.Floor(removed * basePrice)) < 0.01;
+                    c.details.Add("hold sale steps for " + key + ": hold " + heldBefore + " -> " + heldAfter + " (taken " + (heldBefore - heldAfter) + "), counted before " + before + " after " + after + ", paid for " + removed
+                                  + "; mod predicted take " + (ml == null ? 0 : ml.qty) + " pay " + (ml == null ? 0 : ml.total) + " note: " + (ml?.note ?? "") + (stepOk ? " ok" : " WRONG"));
+                    ok &= stepOk;
                 }
+                // Mark the hold sale as done for this NPC, as the dialogue does (Utils.CreateTempVar).
+                var d = Caravans.Deals();
+                if (si != null && d.buyOnce != null)
+                {
+                    Locked(() => ET_CSAPI.utils_createtempvar(d.buyOnce + black.NpcUid, 1L));
+                    yield return Refresh(); snap = host.Latest;
+                    si = snap.caravans.Find(x => x.uid == ci.uid);
+                    bool done = si != null && si.smugglerSold && si.lines.FindAll(l => !l.sells).TrueForAll(l => l.note.Contains("已经收过"));
+                    c.details.Add("after the dialogue's record " + d.buyOnce + black.NpcUid + ": mod says sold=" + (si != null && si.smugglerSold) + (done ? " ok" : " WRONG"));
+                    ok &= done;
+                    Locked(() => ET_CSAPI.utils_deletetempvar(d.buyOnce + black.NpcUid));
+                }
+                host.SetVisible(true); host.ShowTab(4);
+                yield return new WaitForSecondsRealtime(0.5f);
+                Ui.CaravansView.Current?.Select(ci.uid);
+                yield return new WaitForSecondsRealtime(1f);
+                yield return Shot("smuggler");
+                host.SetVisible(false);
                 Locked(() => cfl.caravan = original);
                 yield return Refresh();
             }

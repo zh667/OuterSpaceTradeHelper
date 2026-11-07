@@ -125,6 +125,7 @@ namespace TradeHelper.Ui
 
             body = Kit.Place(Kit.New("Body", win), Pad, BodyY, BodyW, BodyH);
             popupLayer = Kit.Stretch(Kit.New("PopupLayer", win));
+            Tooltip.layer = popupLayer;
             Kit.Drop.CloseAll = () => { foreach (var v in views.Values) (v as ViewBase)?.CloseDrops(); };
             if (cfg.panelResizable) AddResizeHandles();
             SelectTab(0);

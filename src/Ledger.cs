@@ -88,6 +88,10 @@ namespace TradeHelper
                 {
                     var f = JsonConvert.DeserializeObject<LedgerFile>(File.ReadAllText(Path));
                     if (f?.entries != null) entries = f.entries;
+                    // Before 0.6.0 caravan checkouts were not priced: say so on those old entries.
+                    foreach (var e in entries)
+                        if (e != null && e.market == null && e.note != null && e.note.StartsWith("没看到购物车"))
+                            e.note = "模组没看到这次结账的购物车，只记下信用点变化（0.6.0 之前在商队那里的买卖都是这样，0.6.0 起会逐项记下）";
                 }
             }
             catch (Exception e) { Debug.LogWarning("[TradeHelper] ledger read failed: " + e.Message); }
@@ -264,7 +268,7 @@ namespace TradeHelper
                     e.note = "信用点实际变化 " + delta + "，结账单算的是 " + b.delta + "（差 " + (delta - b.delta) + "：结账前价格刚变，或同一时刻还有别的收支）；各行金额是结账单的";
             }
             else if (checkouts > 1) e.note = "两次结账之间没来得及看购物车，只记下信用点变化";
-            else e.note = "没看到购物车（不是在贸易市场或商队的交易界面结的账），只记下信用点变化";
+            else e.note = "模组没看到这次结账的购物车（不是在贸易市场或商队的交易界面里结的账），只记下信用点变化";
             bill = null; billSig = null;
             entries.Add(e);
             pending.Add(e);
