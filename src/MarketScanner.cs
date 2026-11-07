@@ -289,6 +289,8 @@ namespace TradeHelper
         public List<string> tradeCategories = new List<string>();
         public Dictionary<string, string> categoryNote = new Dictionary<string, string>();
         public List<SellIdea> sells = new List<SellIdea>();
+        // Caravans and suspicious caravans (smuggler fleets) the player can trade with (Caravans.Scan).
+        public List<CaravanInfo> caravans = new List<CaravanInfo>();
         public long scanMs;
         public int marketsDone, marketsTotal, marketsReused;
         public bool complete, adviceReused;
@@ -699,6 +701,11 @@ namespace TradeHelper
             try { ScanInventory(gd, snap); }
             catch (Exception e) { snap.errors.Add("读库存失败: " + e.Message); }
             Budget.tInventory += System.Diagnostics.Stopwatch.GetTimestamp() - ti;
+            yield return null;
+
+            snap.phase = "读商队";
+            try { Caravans.Scan(gd, snap, cfg); }
+            catch (Exception e) { snap.errors.Add("读商队失败: " + e.Message); }
             yield return null;
 
             unchecked

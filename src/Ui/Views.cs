@@ -257,6 +257,104 @@ namespace TradeHelper.Ui
         }
     }
 
+    // Caravans and suspicious caravans (smuggler fleets): where they are, how long they stay, what they sell and what of
+    // the fleet's hold they would buy, against the best station.
+    public class CaravansView : ViewBase
+    {
+        public static CaravansView Current;
+        readonly Table<CaravanInfo> list;
+        readonly Table<CaravanLine> lines;
+        readonly TextMeshProUGUI head;
+        CaravanInfo selected;
+        long selectedUid = -1;
+        bool showSells = true, showBuys = true;
+
+        public static string Left(long mm)
+        {
+            if (mm < 0) return "不会自己离开";
+            long h = mm / Caravans.GameHourMM;
+            if (h < 1) return "不到 1 小时";
+            return h >= 24 ? (h / 24) + " 天 " + (h % 24) + " 小时" : h + " 小时";
+        }
+
+        static string Price(double v) => double.IsNaN(v) ? "—" : Fmt.Money(v);
+
+        public CaravansView(Window w, RectTransform body, Config cfg, TradeHelperBehaviour host) : base(w, body, cfg, host)
+        {
+            const float LW = 520;
+            Current = this;
+            Kit.TxtAt(root, "商队（点击查看）", 0, 0, LW, 30, 17, Theme.Text);
+            var ccols = new List<Column<CaravanInfo>>
+            {
+                new Column<CaravanInfo> { title = "商队", width = 170, text = c => (c.black ? "可疑 · " : "") + c.name, key = c => c.name, color = c => c.black ? Theme.Warn : Theme.Text },
+                new Column<CaravanInfo> { title = "星系", width = 110, text = c => c.galaxyName + c.NotVisitedTag, key = c => c.galaxyName, color = c => c.observe >= 2 ? Theme.Text : Theme.Text2 },
+                new Column<CaravanInfo> { title = "距舰队", width = 90, text = c => Fmt.Dist(c.fleetAu), key = c => c.fleetAu < 0 ? (IComparable)null : c.fleetAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<CaravanInfo> { title = "还剩", width = 90, text = c => Left(c.leftMM), key = c => c.leftMM < 0 ? long.MaxValue : c.leftMM, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<CaravanInfo> { title = "关系", width = 60, text = c => c.present ? c.relation : "未出场", key = c => c.relation, color = c => c.hostile ? Theme.Bad : Theme.Text2 },
+            };
+            list = new Table<CaravanInfo>(root, 0, 40, LW, w.BodyH - 40, ccols, 2, false);
+            list.onRowClick = c => { selected = c; selectedUid = c.uid; ShowLines(); };
+            list.isSelected = c => c.uid == selectedUid;
+            list.emptyText = "现在没有能交易的商队。商队和可疑商队（走私船）是临时出现的 NPC 舰队，过一段时间会离开；走私船每个星系最多一支，而且不常有。";
+
+            float gx = LW + 16, gw = w.BodyW - gx;
+            Kit.Toggle(root, "它卖的", gx, 1, 100, showSells, v => { showSells = v; lines.Resort(); });
+            Kit.Toggle(root, "它收我舰队背包里的", gx + 108, 1, 200, showBuys, v => { showBuys = v; lines.Resort(); });
+            head = Kit.TxtAt(root, "", gx, 30, gw, 66, 14, Theme.Text);
+            head.enableWordWrapping = true;
+            var lcols = new List<Column<CaravanLine>>
+            {
+                new Column<CaravanLine> { title = "货物", width = 150, text = l => l.name, key = l => l.name },
+                new Column<CaravanLine> { title = "方向", width = 80, text = l => l.sells ? "卖给你" : "收你的", key = l => l.sells, color = l => l.sells ? Theme.Text : Theme.Good },
+                new Column<CaravanLine> { title = "数量", width = 64, text = l => l.qty.ToString(), key = l => l.qty, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<CaravanLine> { title = "1 个", width = 100, text = l => Price(l.unit), key = l => double.IsNaN(l.unit) ? (IComparable)null : l.unit, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<CaravanLine> { title = "全部", width = 110, text = l => Price(l.total), key = l => double.IsNaN(l.total) ? (IComparable)null : l.total, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<CaravanLine> { title = "违禁", width = 56, text = l => l.contraband ? "违禁" : "", key = l => l.contraband, color = _ => Theme.Bad },
+                new Column<CaravanLine> { title = "空间站最好卖 1 个", width = 130, text = l => Price(l.best), key = l => double.IsNaN(l.best) ? (IComparable)null : l.best, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<CaravanLine> { title = "那个站", width = 160, text = l => l.bestName ?? "—", key = l => l.bestName, color = _ => Theme.Text2 },
+                new Column<CaravanLine> { title = "每个比空间站", width = 110, text = l => { var g = l.Gain; return double.IsNaN(g) ? "—" : (g >= 0 ? "+" : "") + Fmt.Money(g); },
+                    key = l => double.IsNaN(l.Gain) ? (IComparable)null : l.Gain, numeric = true, align = TextAlignmentOptions.MidlineRight, color = l => double.IsNaN(l.Gain) ? Theme.Text2 : l.Gain > 0 ? Theme.Accent : Theme.Text2 },
+                new Column<CaravanLine> { title = "说明", width = 260, text = l => l.note, key = null, color = _ => Theme.Text2 },
+            };
+            lines = new Table<CaravanLine>(root, gx, 100, gw, w.BodyH - 100, lcols, 8, true);
+            lines.filter = l => l.sells ? showSells : showBuys;
+            lines.emptyText = "先在左边选一支商队。";
+        }
+
+        void ShowLines()
+        {
+            if (selected == null) { head.text = ""; lines.SetData(new List<CaravanLine>()); return; }
+            var c = selected;
+            if (!c.present)
+            {
+                head.text = "<b>" + c.kind + "  " + c.name + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    还剩 " + Left(c.leftMM)
+                    + "\n<size=13><color=#D8982F>" + c.priceNote + "</color></size>";
+                lines.SetData(c.lines);
+                return;
+            }
+            head.text = "<b>" + c.kind + "  " + c.name + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    还剩 " + Left(c.leftMM)
+                + "\n<size=13><color=#A4A5A6>商队资金 " + Fmt.Money(c.cash) + "  ·  税 " + (c.tax * 100).ToString("0") + "%（按来源站 " + c.source + "）  ·  价格系数 " + c.priceModifier + "%"
+                + (c.metPlayer ? "" : "（还没打过交道，按游戏默认）") + "：买它的货 ×" + c.FactorBuy.ToString("0.##") + "，卖给它 ×" + c.FactorSell.ToString("0.##")
+                + "\n怎么交易：舰队飞到它旁边，点它对话选交易；" + (c.black ? "可疑商队会主动靠近你搭话。卖给它的货不检查违禁。" : "敌对的商队不能交易。")
+                + (string.IsNullOrEmpty(c.priceNote) ? "" : "  <color=#D8982F>" + c.priceNote + "</color>") + "</color></size>";
+            lines.SetData(c.lines);
+        }
+
+        public CaravanInfo Selected => selected;
+        public void Select(long uid) { if (snap == null) return; selected = snap.caravans.Find(c => c.uid == uid); selectedUid = selected != null ? uid : -1; ShowLines(); list.Bind(); }
+        public Table<CaravanLine> LinesForTest => lines;
+
+        public override void OnSnapshot(Snapshot s)
+        {
+            base.OnSnapshot(s);
+            list.SetData(s.caravans);
+            selected = s.caravans.Find(c => c.uid == selectedUid);
+            if (selected == null && s.caravans.Count > 0) { selected = s.caravans[0]; selectedUid = selected.uid; }
+            ShowLines();
+            list.Bind();
+        }
+    }
+
     public class InventoryView : ViewBase
     {
         public class Row
@@ -757,7 +855,7 @@ namespace TradeHelper.Ui
 
         public LedgerView(Window w, RectTransform body, Config cfg, TradeHelperBehaviour host) : base(w, body, cfg, host)
         {
-            Kit.TxtAt(root, "在贸易市场结账时，模组按游戏界面的结账单给购物车里每件货算价，再和信用点的实际变化核对：一致就是“精确”，每种货在哪卖、到手多少都准（舰载机这类游戏不留成交记录的货也一样）。只记装了 0.4.8 以后的结账。", 0, 0, w.BodyW, 24, 14, Theme.Text2);
+            Kit.TxtAt(root, "在贸易市场或商队结账时，模组按游戏界面的结账单给购物车里每件货算价，再和信用点的实际变化核对：一致就是“精确”，每种货在哪卖、到手多少都准（舰载机这类游戏不留成交记录的货也一样）。只记装了 0.4.8 以后的结账。", 0, 0, w.BodyW, 24, 14, Theme.Text2);
             summary = Kit.TxtAt(root, "", 0, 30, w.BodyW, 30, 15, Theme.Text);
             var cols = new List<Column<Row>>
             {

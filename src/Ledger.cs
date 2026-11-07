@@ -51,6 +51,7 @@ namespace TradeHelper
         public static int version;
         public static Func<long, string> marketName = uid => null;
         public static Func<string, string> goodsName = key => null;
+        public static Func<FWCaravanFleet, string> caravanGalaxy;
         const int Max = 2000;
         static string Path => System.IO.Path.Combine(Config.Dir, "ledger.json");
         static bool loaded;
@@ -61,6 +62,7 @@ namespace TradeHelper
             public List<LedgerItem> items = new List<LedgerItem>();
             public double buy, sell;
             public bool complete = true;      // every line priced
+            public bool caravan;              // a caravan's trade page: the price factor holds the tax
             public long delta;                // credits change the checkout will make
             public float at;
         }
@@ -161,10 +163,14 @@ namespace TradeHelper
             if (!Reflect()) return;
             var h = fHandler.GetValue(page) as ExchangeTransferHandler;
             var left = fLeft.GetValue(page) as ExchangeInventoryContext;
-            if (h == null || h is CaravanTransferHandler || left?.Exchange == null) { bill = null; billSig = null; return; }
+            // A caravan's trade page (CaravanTransferHandler): lines are priced with the caravan's price factor, which
+            // already holds the tax (PageTradeInventory.QuoteCart / DoCaravanCheckout).
+            var cctx = (h as CaravanTransferHandler)?.CaravanContext;
+            if (h == null || (cctx == null && left?.Exchange == null)) { bill = null; billSig = null; return; }
             int lines = h.BuyCart.Count + h.SellCart.Count + h.BuyShipCart.Count + h.SellShipCart.Count + h.BuyCrewCart.Count + h.SellCrewCart.Count;
             if (lines == 0) { bill = null; billSig = null; return; }
-            var sig = new System.Text.StringBuilder().Append(left.Exchange.uid);
+            long uid = cctx != null ? -Math.Abs(cctx.CaravanFleet != null ? cctx.CaravanFleet.getUid() : (cctx.Caravan?.uid ?? 0)) : left.Exchange.uid;
+            var sig = new System.Text.StringBuilder().Append(uid);
             foreach (var it in h.BuyCart) sig.Append("|b").Append(it.ItemID).Append(':').Append(Key(it)).Append('x').Append(it.Quantity);
             foreach (var it in h.SellCart) sig.Append("|s").Append(it.ItemID).Append(':').Append(Key(it)).Append('x').Append(it.Quantity);
             sig.Append("|ships ").Append(h.BuyShipCart.Count).Append('/').Append(h.SellShipCart.Count).Append("|crew ").Append(h.BuyCrewCart.Count).Append('/').Append(h.SellCrewCart.Count);
@@ -174,16 +180,27 @@ namespace TradeHelper
             if (!GameLock.TryEnter(gd)) return;
             try
             {
-                var b = new Bill { marketUid = left.Exchange.uid, at = Time.unscaledTime };
-                b.market = marketName(b.marketUid) ?? ("贸易市场 " + b.marketUid);
-                b.tax = (float)mTax.Invoke(page, null);
+                var b = new Bill { marketUid = uid, at = Time.unscaledTime };
+                if (cctx != null)
+                {
+                    var cf = cctx.CaravanFleet;
+                    string nm = cf != null && !string.IsNullOrEmpty(cf.name) ? cf.name : "商队";
+                    b.market = (cctx.Caravan != null && cctx.Caravan.isBlackMarket ? "可疑商队 " : "商队 ") + nm + (caravanGalaxy != null && cf != null ? "（" + caravanGalaxy(cf) + "）" : "");
+                    b.tax = cctx.GetCurrentTaxRate();
+                    b.caravan = true;
+                }
+                else
+                {
+                    b.market = marketName(b.marketUid) ?? ("贸易市场 " + b.marketUid);
+                    b.tax = (float)mTax.Invoke(page, null);
+                }
                 var preview = new FWTradePressurePreview();
                 foreach (bool buying in new[] { true, false })
                     foreach (var it in buying ? h.BuyCart : h.SellCart)
                     {
                         double raw;
                         var q = mPreview.Invoke(page, new object[] { preview, it, buying }) as FWTradePressureQuote;
-                        if (q != null) raw = q.rawPrice;
+                        if (q != null) raw = q.rawPrice * (cctx != null ? cctx.GetPriceFactor(buying) : 1.0);
                         else raw = (double)mResolve.Invoke(page, new object[] { it, buying, preview });
                         string key = Key(it);
                         b.items.Add(new LedgerItem { key = key, name = goodsName(key) ?? key, buy = buying, qty = it.Quantity, raw = raw });
@@ -198,11 +215,22 @@ namespace TradeHelper
                     }
                 foreach (var crew in h.BuyCrewCart) { double p = (float)mCrew.Invoke(page, new object[] { crew, true }); b.buy += p; b.items.Add(new LedgerItem { key = "crew", name = "人员", buy = true, qty = 1, raw = p }); }
                 foreach (var crew in h.SellCrewCart) { double p = (float)mCrew.Invoke(page, new object[] { crew, false }); b.sell += p; b.items.Add(new LedgerItem { key = "crew", name = "人员", buy = false, qty = 1, raw = p }); }
-                // The checkout (PageTradeInventory.DoExchangeCheckout) rounds the two totals once each.
-                long pay = FWTradePricePressure.RoundPayment(b.buy * Math.Max(0.0, 1.0 + b.tax), true);
-                long get = FWTradePricePressure.RoundPayment(b.sell * Math.Max(0.0, 1.0 - b.tax), false);
-                b.delta = get - pay;
-                foreach (var li in b.items) li.net = li.buy ? -li.raw * Math.Max(0.0, 1.0 + b.tax) : li.raw * Math.Max(0.0, 1.0 - b.tax);
+                if (b.caravan)
+                {
+                    // DoCaravanCheckout rounds the two totals once each; the price factor already holds the tax.
+                    long pay = FWTradePricePressure.RoundPayment(b.buy, true);
+                    long get = FWTradePricePressure.RoundPayment(b.sell, false);
+                    b.delta = get - pay;
+                    foreach (var li in b.items) li.net = li.buy ? -li.raw : li.raw;
+                }
+                else
+                {
+                    // The checkout (PageTradeInventory.DoExchangeCheckout) rounds the two totals once each.
+                    long pay = FWTradePricePressure.RoundPayment(b.buy * Math.Max(0.0, 1.0 + b.tax), true);
+                    long get = FWTradePricePressure.RoundPayment(b.sell * Math.Max(0.0, 1.0 - b.tax), false);
+                    b.delta = get - pay;
+                    foreach (var li in b.items) li.net = li.buy ? -li.raw * Math.Max(0.0, 1.0 + b.tax) : li.raw * Math.Max(0.0, 1.0 - b.tax);
+                }
                 bill = b; billSig = s;
             }
             catch (Exception e)
@@ -230,7 +258,7 @@ namespace TradeHelper
                     e.note = "信用点实际变化 " + delta + "，结账单算的是 " + b.delta + "（差 " + (delta - b.delta) + "：结账前价格刚变，或同一时刻还有别的收支）；各行金额是结账单的";
             }
             else if (checkouts > 1) e.note = "两次结账之间没来得及看购物车，只记下信用点变化";
-            else e.note = "没看到购物车（不是在贸易市场界面结的账，例如商队交易），只记下信用点变化";
+            else e.note = "没看到购物车（不是在贸易市场或商队的交易界面结的账），只记下信用点变化";
             bill = null; billSig = null;
             entries.Add(e);
             pending.Add(e);

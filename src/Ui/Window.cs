@@ -49,7 +49,7 @@ namespace TradeHelper.Ui
         readonly Dictionary<int, IView> views = new Dictionary<int, IView>();
         int tab;
         public Snapshot snap;
-        static readonly string[] TabNames = { "跑商建议", "跑商计划", "卖库存", "各站市场", "我的库存", "后台补算", "结账记录", "设置" };
+        static readonly string[] TabNames = { "跑商建议", "跑商计划", "卖库存", "各站市场", "商队", "我的库存", "后台补算", "结账记录", "设置" };
         public const float BodyY = 112, Pad = 18, DefaultW = 1560, DefaultH = 860, MinW = 1360, MinH = 700;
         // Size of the panel, from the config, kept between MinW/MinH and the screen.
         public float W = DefaultW, H = DefaultH;
@@ -272,10 +272,11 @@ namespace TradeHelper.Ui
                     case 1: v = new PlansView(this, body, cfg, host); break;
                     case 2: v = new SellsView(this, body, cfg, host); break;
                     case 3: v = new MarketsView(this, body, cfg, host); break;
-                    case 4: v = new InventoryView(this, body, cfg, host); break;
-                    case 5: v = new SettlementView(this, body, cfg, host); break;
-                    case 6: v = new LedgerView(this, body, cfg, host); break;
-                    case 7: v = new SettingsView(this, body, cfg, host); break;
+                    case 4: v = new CaravansView(this, body, cfg, host); break;
+                    case 5: v = new InventoryView(this, body, cfg, host); break;
+                    case 6: v = new SettlementView(this, body, cfg, host); break;
+                    case 7: v = new LedgerView(this, body, cfg, host); break;
+                    case 8: v = new SettingsView(this, body, cfg, host); break;
                 }
                 views[t] = v;
                 if (snap != null) v.OnSnapshot(snap);
