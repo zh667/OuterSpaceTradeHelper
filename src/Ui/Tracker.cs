@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Script.FreeWorldAirShip.Galaxy.GalaxyField;
 using Script.FreeWorldAirShip.Galaxy.NPCFleet;
 using TMPro;
@@ -56,7 +57,17 @@ namespace TradeHelper.Ui
         // A fixed point instead of a fleet: where a smuggler will appear (local coordinates of the galaxy).
         public static bool pointMode;
         static Vector2 pointLocal;
-        public static Vector3 PointWorld => LocalToWorld(pointLocal);
+        public static Vector3 PointWorld => LocalToWorld(galaxyId, pointLocal);
+
+        // A galaxy-local position in world space: through the NPC fleets' parent when the game has that galaxy's fleets
+        // laid out, else at the galaxy's place on the star field (GalaxyFieldScene.GetGalaxyPos) plus the local offset.
+        public static Vector3 LocalToWorld(string gid, Vector2 local)
+        {
+            var mgr = GalaxyNPCFleetManager.Instance;
+            if (mgr != null && mgr.GetGalaxyId() == gid) return LocalToWorld(local);
+            var gs = GalaxyFieldScene.Instance;
+            return (gs != null ? gs.GetGalaxyPos(gid) : Vector3.zero) + new Vector3(local.x, local.y, 0);
+        }
 
         public static void TrackPoint(string gid, string gname, Vector2 local, string label)
         {
@@ -264,6 +275,64 @@ namespace TradeHelper.Ui
             return new Vector2(Vector3.Dot(off, right.normalized), Vector3.Dot(off, up.normalized));
         }
 
+        static readonly List<RectTransform> segs = new List<RectTransform>(), dots = new List<RectTransform>();
+        public static int PathSegmentsShown;
+
+        static RectTransform Piece(List<RectTransform> pool, int i, string kind)
+        {
+            while (pool.Count <= i)
+            {
+                var rt = Kit.New(kind, root);
+                rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0.5f);
+                var im = rt.gameObject.AddComponent<Image>();
+                im.sprite = Theme.White; im.raycastTarget = false;
+                im.color = kind == "Seg" ? new Color(Theme.Accent.r, Theme.Accent.g, Theme.Accent.b, 0.55f) : Theme.Accent;
+                rt.SetAsFirstSibling();
+                pool.Add(rt);
+            }
+            return pool[i];
+        }
+
+        static void HidePath()
+        {
+            foreach (var r in segs) if (r.gameObject.activeSelf) r.gameObject.SetActive(false);
+            foreach (var r in dots) if (r.gameObject.activeSelf) r.gameObject.SetActive(false);
+            PathSegmentsShown = 0;
+        }
+
+        // Galaxy-local points of the tracked fleet's galaxy, projected with the game's camera; parts behind the camera
+        // are left out.
+        static void DrawPath(Camera cam, List<Vector2> pts)
+        {
+            int si = 0, di = 0;
+            Vector2 prev = default; bool havePrev = false;
+            for (int i = 0; i < pts.Count; i++)
+            {
+                var sp = cam.WorldToScreenPoint(LocalToWorld(galaxyId, pts[i]));
+                if (sp.z <= 0) { havePrev = false; continue; }
+                Vector2 local;
+                RectTransformUtility.ScreenPointToLocalPointInRectangle(root, new Vector2(sp.x, sp.y), null, out local);
+                if (i > 0)
+                {
+                    var d = Piece(dots, di++, "Dot");
+                    d.gameObject.SetActive(true); d.sizeDelta = new Vector2(8, 8); d.anchoredPosition = local;
+                }
+                if (havePrev)
+                {
+                    var seg = Piece(segs, si++, "Seg");
+                    var v = local - prev;
+                    seg.gameObject.SetActive(true);
+                    seg.sizeDelta = new Vector2(v.magnitude, 3);
+                    seg.anchoredPosition = (local + prev) / 2;
+                    seg.localRotation = Quaternion.Euler(0, 0, Mathf.Atan2(v.y, v.x) * Mathf.Rad2Deg);
+                }
+                prev = local; havePrev = true;
+            }
+            for (int i = si; i < segs.Count; i++) if (segs[i].gameObject.activeSelf) segs[i].gameObject.SetActive(false);
+            for (int i = di; i < dots.Count; i++) if (dots[i].gameObject.activeSelf) dots[i].gameObject.SetActive(false);
+            PathSegmentsShown = si;
+        }
+
         // The name label's text lies inside the screen (for the self-test; the overlay canvas works in screen pixels).
         public static bool LabelInside(out string where)
         {
@@ -314,7 +383,7 @@ namespace TradeHelper.Ui
             {
                 // Shown where the NPC fleets of that galaxy are laid out: its galaxy view, or the star field after it.
                 var pm = GalaxyNPCFleetManager.Instance;
-                Found = pm != null && pm.GetGalaxyId() == galaxyId;
+                Found = (pm != null && pm.GetGalaxyId() == galaxyId) || (InStarField && gs != null && gs.GetGalaxyPos(galaxyId) != Vector3.zero);
             }
             var entry = InStarField && !pointMode ? MapEntry() : null;
             icon = MapDot(entry);
@@ -332,13 +401,14 @@ namespace TradeHelper.Ui
             else if (focusUntil > 0 && Time.unscaledTime > focusUntil) focusUntil = 0;
             if (!Shown || !view || cam == null || !cam.isActiveAndEnabled)
             {
+                HidePath();
                 marker.gameObject.SetActive(false);
                 OnScreen = false;
                 Status = "追踪中：" + name + "：" + (pointMode ? "进入 " + galaxyName + " 的星系画面才标得出（F11）" : InStarField ? WhyNotOnStarField() : Found && view && !Shown ? "它的船现在没显示（游戏把它藏起来了：多半正在进出跃迁门、停靠或刚离开），先不画标记" : WhyNotShown(Found, view));
                 info.text = Status;
                 return;
             }
-            Vector3 target = pointMode ? LocalToWorld(pointLocal) : UsingMapDot ? icon.bounds.center : npc.transform.position;
+            Vector3 target = pointMode ? PointWorld : UsingMapDot ? icon.bounds.center : npc.transform.position;
             Vector3 sp = cam.WorldToScreenPoint(target);
             Projected = sp;
             bool behind = sp.z <= 0;
@@ -382,6 +452,10 @@ namespace TradeHelper.Ui
             // Off screen near the top edge the name goes under the ring instead (the top has the game's bars).
             if (!OnScreen && p.y > h - 120) { lr.anchorMin = new Vector2(lr.anchorMin.x, 0f); lr.anchorMax = new Vector2(lr.anchorMax.x, 0f); lr.pivot = new Vector2(lr.pivot.x, 1f); lr.anchoredPosition = new Vector2(0, -4); }
             label.text = OnScreen ? name : Arrow(Direction) + " " + name;
+            // The path it still has to fly (its route in the game's path module), so it can be met further along.
+            List<Vector2> ahead = null;
+            if (!pointMode) { try { ahead = Motion.PathAhead(uid); } catch { } }
+            if (ahead != null) DrawPath(cam, ahead); else HidePath();
             Status = OnScreen ? "追踪中：" + name : "追踪中：" + name + "（在屏幕外）";
             info.text = OnScreen ? "" : "追踪中：" + name + " 在屏幕外，按箭头方向拖动或缩小地图";
         }

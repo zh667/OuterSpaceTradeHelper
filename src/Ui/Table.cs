@@ -313,7 +313,10 @@ namespace TradeHelper.Ui
                     {
                         if (row.buttons[c] != null)
                         {
-                            row.buttons[c].Text = col.buttonText != null ? col.buttonText(item) : "";
+                            string bt = col.buttonText != null ? col.buttonText(item) : "";
+                            row.buttons[c].Text = bt;
+                            // A button with no text has nothing to do on this row: hide it.
+                            var bgo = row.buttons[c].button.gameObject; if (bgo.activeSelf != (bt.Length > 0)) bgo.SetActive(bt.Length > 0);
                             row.buttons[c].Interactable = col.buttonEnabled == null || col.buttonEnabled(item);
                             if (col.buttonPrimary != null) row.buttons[c].Primary = col.buttonPrimary(item);
                         }

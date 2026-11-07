@@ -76,6 +76,24 @@ namespace TradeHelper
             }
         }
 
+        // The path a fleet in the scene still has to fly (its position, then the path points from the next one), or
+        // null. For drawing; read from the game's objects at call time.
+        public static List<Vector2> PathAhead(long uid)
+        {
+            var mgr = Script.FreeWorldAirShip.Galaxy.NPCFleet.GalaxyNPCFleetManager.Instance;
+            var npc = mgr != null ? mgr.GetFleetByUid(uid) : null;
+            if (npc == null || !npc) return null;
+            var pf = npc.GetModule<Script.FreeWorldAirShip.Galaxy.NPCFleet.Modules.GalaxyNPCFleetPathFindingModule>();
+            if (pf == null || !pf.HasValidPath || pf.PathPoints == null) return null;
+            var r = new List<Vector2> { npc.GetLocalPosition() };
+            for (int i = Math.Max(0, pf.CurrentPathIndex); i < pf.PathPoints.Count; i++) r.Add(pf.PathPoints[i]);
+            return r;
+        }
+
+        // Typical flight speed measured in the scene (galaxy units per game hour; caravans 13-17, smugglers 12-18
+        // including their stops), for fleets not in the scene.
+        public const double TypicalPerHour = 15.0;
+
         // Route length still to fly: to the next point, then the remaining segments.
         public static double RouteLeft(List<Vector2> route, int idx, Vector2 pos)
         {
@@ -117,6 +135,8 @@ namespace TradeHelper
         public long predDay = -1;
         public int predSlot = -1;
         public string predNote;
+        public long predFromMM, predUntilMM;   // game-time window (absolute) in which entering gives this spawn point
+        public long nextCheckMM;               // absolute game time of the galaxy's next check
         public string NotVisitedTag => observe >= 2 ? "" : observe >= 1 ? "（未探索）" : "（未发现）";
         public string StateText
         {
@@ -145,6 +165,8 @@ namespace TradeHelper
         public double fleetAu = -1;
         public long leftMM = -1;         // game time until it leaves (-1: no set departure)
         public List<Vector2> route;      // its route in the galaxy (FWFactionFleet.activityRoutePoints, local coordinates)
+        public double routeLen;          // that route's length
+        public long appearMM = -1;       // absolute game time it appeared (activityAppearTime)
         public bool journey;             // crossing galaxies (FleetJourney): no route end here
         public long cash;                // the caravan's own credits: it cannot pay more than this for what it buys
         public int priceModifier = 150;  // the fleet's price modifier towards the player, percent (FWFleetRelation.priceModifier)
@@ -282,6 +304,26 @@ namespace TradeHelper
         // NomadicFleetSpawnRules.ResolvePlannedCycles; then the game's own TryBuildLowFrequencyPlan on the galaxy's
         // spatial map (GalaxySpatialMapProvider.Resolve). No randomness beyond the seed.
         static System.Reflection.MethodInfo planFn;
+
+        // On request from the panel (main thread, under the game's locks; false when they are busy).
+        public static bool PredictNow(FWGameData gd, SmugglerSpot s)
+        {
+            if (gd == null || s == null || !GameLock.TryEnter(gd)) return false;
+            try
+            {
+                var g = gd.getGalaxy(s.galaxyId);
+                if (g != null) s.nextCheckMM = g.nextNomadicFleetRefreshTime;
+                Predict(gd, s.galaxyId, gd.factionFleetRepository, s);
+            }
+            catch (Exception e) { s.predNote = "算不出出生点：" + (e.InnerException ?? e).Message; }
+            finally { GameLock.Exit(gd); }
+            return true;
+        }
+
+        const long DayMM = 1440000L, NoonMM = 720000L;   // WorldTimeTools: 1 game day, 12 game hours
+        // The game's day number at a game time (ForceDailyRefreshSchedule.GetLastDueDay: the day turns at 12:00).
+        public static long DayAt(long mm) => mm < NoonMM ? 0 : (mm - NoonMM) / DayMM;
+
         static void Predict(FWGameData gd, string galaxyId, List<FWFactionFleet> repo, SmugglerSpot s)
         {
             var star = GalaxyMapData.getInstance()?.getGalaxyStar(galaxyId);
@@ -296,7 +338,12 @@ namespace TradeHelper
                 foreach (var f in repo) if (f != null && !f.resultSettled && f.activityTargetKey == key) { used = true; break; }
                 if (!used) slot = i;
             }
-            long day = gd.ForceTime_Day;
+            // Entering now (due) or when the next check comes (waiting): the day at that moment; the point holds until
+            // the day turns at the next 12:00.
+            long from = Math.Max(gd.elapsedMM, s.nextCheckMM);
+            long day = from <= gd.elapsedMM ? gd.ForceTime_Day : DayAt(from);
+            s.predFromMM = from;
+            s.predUntilMM = (DayAt(from) + 1) * DayMM + NoonMM;
             string text = galaxyId + ":8:" + slot + ":" + Math.Max(0L, day);
             uint h = 2166136261u;
             unchecked { foreach (char ch in text) h = (h ^ ch) * 16777619; }
@@ -352,7 +399,9 @@ namespace TradeHelper
                         s.state = host < 0 ? SmugglerSpot.Unknown : s.waitMM == 0 ? SmugglerSpot.Due : SmugglerSpot.Wait;
                     }
                 }
-                if (s.state == SmugglerSpot.Due && g.id == snap.fleetGalaxyId)
+                s.nextCheckMM = g.nextNomadicFleetRefreshTime;
+                // The fleet's own galaxy: predicted right away (its map is the one the game has loaded). Others on request.
+                if ((s.state == SmugglerSpot.Due || s.state == SmugglerSpot.Wait) && g.id == snap.fleetGalaxyId)
                 {
                     try { Predict(gd, g.id, repo, s); }
                     catch (Exception e) { s.predNote = "算不出出生点：" + (e.InnerException ?? e).Message; }
@@ -391,6 +440,8 @@ namespace TradeHelper
             {
                 c.route = new List<Vector2>(f.activityRoutePoints.Count);
                 foreach (var pt in f.activityRoutePoints) if (pt != null) c.route.Add(new Vector2(pt.x, pt.y));
+                for (int k = 1; k < c.route.Count; k++) c.routeLen += Vector2.Distance(c.route[k - 1], c.route[k]);
+                c.appearMM = f.activityAppearTime;
             }
             if (c.kept)
                 c.priceNote = "它现在不在场景里（舰队在它所在的星系、进入星系画面时才会出场：左上角“至星系”，F11；星域图拉近看到的星系里没有 NPC 舰队），下面是上次出场时的货和价格，出场后可能已经变了；不在场景里时不能交易";

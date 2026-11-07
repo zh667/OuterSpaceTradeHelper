@@ -1159,9 +1159,28 @@ namespace TradeHelper
                     if (f != null && f.IsNomadicOwned && f.galaxyId == fg && ImplDef<G_ForceFleetType_Def>.getDataID(f.gForceFleetTypeResId)?.ActivityType == (int)GalaxyNPCFleetType.Smuggler && (r == null || f.activityAppearTime > r.activityAppearTime)) r = f;
                 return r;
             };
-            Locked(() => { var g = gd.getGalaxy(fg); if (g != null) g.nextNomadicFleetRefreshTime = gd.elapsedMM; });
+            // Test copy: end a smuggler already in this galaxy (the game's own settlement), so a new one can come.
+            {
+                var old = new List<long>();
+                Locked(() => { foreach (var f in gd.factionFleetRepository) if (f != null && !f.resultSettled && f.IsNomadicOwned && f.galaxyId == fg && ImplDef<G_ForceFleetType_Def>.getDataID(f.gForceFleetTypeResId)?.ActivityType == (int)GalaxyNPCFleetType.Smuggler) old.Add(f.uid); });
+                foreach (var u in old)
+                {
+                    bool okSettle = false;
+                    Locked(() => okSettle = FactionFleetSettlementService.TrySettleFactionFleet(gd, u, "TechnicalCleanup"));
+                    c.details.Add("test copy: ended the smuggler already here (" + u + "): " + okSettle);
+                }
+            }
+            // Test copy: the next check 3 game hours from now. The forecast predicts for that moment while waiting; then
+            // the clock runs past it (outside the galaxy view, so nothing spawns yet) and the fleet enters.
+            Locked(() => { var g = gd.getGalaxy(fg); if (g != null) g.nextNomadicFleetRefreshTime = gd.elapsedMM + 3 * 60000L; });
             yield return Refresh();
             var spot = host.Latest.smugglerSpots.Find(x => x.galaxyId == fg);
+            c.details.Add("while waiting: " + (spot == null ? "missing" : spot.StateText + " " + Ui.CaravansView.Left(spot.waitMM) + (spot.predicted ? ", predicted spawn " + spot.predStart.ToString("F2") + " for day " + spot.predDay + " (now day " + gd.ForceTime_Day + ")" : ", no prediction: " + spot.predNote)));
+            MapManager.setLogicSpeed(5f);
+            float tw0 = Time.realtimeSinceStartup;
+            while (Time.realtimeSinceStartup - tw0 < 300 && gd.elapsedMM < spot.nextCheckMM + 10 * 1000L) yield return null;
+            MapManager.setLogicSpeed(1f); MapManager.pauseLogic();
+            c.details.Add("clock ran to " + ((gd.elapsedMM - spot.nextCheckMM) / 60000.0).ToString("0.00") + " h past the check, day " + gd.ForceTime_Day + "; state " + (Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance?.CurState.ToString() ?? "?"));
             c.details.Add("forecast for " + fg + " before entering: " + (spot == null ? "missing" : spot.StateText + (spot.predicted ? ", spawn point " + spot.predStart.ToString("F2") + ", route " + spot.predRoute.Count + " points, day " + spot.predDay + ", slot " + spot.predSlot : ", no prediction: " + spot.predNote)));
             try { MainUI_Head.GoGalaxyFleet(); } catch (Exception e) { c.details.Add("GoGalaxyFleet: " + e.Message); }
             float t0 = Time.realtimeSinceStartup;
@@ -1207,6 +1226,25 @@ namespace TradeHelper
                 yield return Shot("spawn-point");
                 Ui.Tracker.Stop();
             }
+            {
+                // Track the new smuggler: the path it still has to fly must be drawn. And the star-field mapping of
+                // galaxy-local points (galaxy position + offset) against the fleets' parent.
+                var tci = new CaravanInfo { uid = s0.uid, name = "smuggler", galaxyId = fg, galaxyName = "" };
+                Ui.Tracker.Track(tci, true);
+                float tt = Time.realtimeSinceStartup;
+                while (Time.realtimeSinceStartup - tt < 15 && !(Ui.Tracker.Shown && Ui.Tracker.PathSegmentsShown > 0)) yield return new WaitForSecondsRealtime(0.5f);
+                yield return Shot("smuggler-path");
+                c.details.Add("tracking the new smuggler: shown " + Ui.Tracker.Shown + ", path segments drawn " + Ui.Tracker.PathSegmentsShown + ", path ahead " + (Motion.PathAhead(s0.uid)?.Count ?? 0) + " points");
+                c.passed &= Ui.Tracker.PathSegmentsShown > 0;
+                Ui.Tracker.Stop();
+                var n1 = mgr?.GetFleetByUid(s0.uid);
+                if (n1 != null)
+                {
+                    var gsx = Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance;
+                    Vector3 viaRoot = Ui.Tracker.LocalToWorld(n1.GetLocalPosition()), viaGalaxy = gsx.GetGalaxyPos(fg) + (Vector3)n1.GetLocalPosition();
+                    c.details.Add("galaxy-local to world: via the fleets' parent " + viaRoot.ToString("F2") + ", via the galaxy position " + viaGalaxy.ToString("F2") + " (gap " + Vector3.Distance(viaRoot, viaGalaxy).ToString("0.000") + ")");
+                }
+            }
             yield return Refresh();
             // Every caravan and the smuggler in this galaxy: route, the mod's estimate a little after it is seen, and when
             // and why it really leaves. Clock x3 as the player plays.
@@ -1215,7 +1253,7 @@ namespace TradeHelper
             var done = new HashSet<long>();
             MapManager.setLogicSpeed(3f);
             float tr = Time.realtimeSinceStartup; long lastLog = -1;
-            while (Time.realtimeSinceStartup - tr < 900)
+            while (Time.realtimeSinceStartup - tr < 600)
             {
                 yield return new WaitForSecondsRealtime(1);
                 long now = gd.elapsedMM;
@@ -1271,6 +1309,28 @@ namespace TradeHelper
                     c.details.Add("  +" + gh + " game h: " + open + " still here; " + string.Join(" | ", parts));
                 }
                 if (open == 0 && done.Count > 0 && done.Contains(s0.uid) && Time.realtimeSinceStartup - tr > 60) break;
+            }
+            {
+                MapManager.setLogicSpeed(1f); MapManager.pauseLogic();
+                yield return Refresh();
+                var other = host.Latest.smugglerSpots.Find(x => x.galaxyId != fg && x.state == SmugglerSpot.Due && x.observe >= 2);
+                if (other != null)
+                {
+                    bool asked = Caravans.PredictNow(gd, other);
+                    c.details.Add("on request for " + other.galaxyName + ": " + (other.predicted ? "spawn " + other.predStart.ToString("F2") + " day " + other.predDay : "none: " + other.predNote) + (asked ? "" : " (locks busy)"));
+                    try { MainUI_Head.GoGalaxyField(null); } catch { }
+                    float tf = Time.realtimeSinceStartup;
+                    while (Time.realtimeSinceStartup - tf < 30 && Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance?.CurState != Script.FreeWorldAirShip.Galaxy.GalaxyField.State.GalaxyField) yield return new WaitForSecondsRealtime(1);
+                    yield return new WaitForSecondsRealtime(3);
+                    if (other.predicted)
+                    {
+                        Ui.Tracker.TrackPoint(other.galaxyId, other.galaxyName, other.predStart, "出生点");
+                        yield return new WaitForSecondsRealtime(1);
+                        yield return Shot("spawn-point-star-field");
+                        c.details.Add("star field point for " + other.galaxyName + ": shown " + Ui.Tracker.Shown + ", " + (Ui.Tracker.OnScreen ? "on screen " : "edge ") + Ui.Tracker.ScreenPos.ToString("F0") + ", galaxy at " + Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance.GetGalaxyPos(other.galaxyId).ToString("F1") + "; " + Ui.Tracker.Status);
+                        Ui.Tracker.Stop();
+                    }
+                }
             }
             foreach (var kv in watch) if (!done.Contains(kv.Key)) c.details.Add("still here at the end: " + kv.Value + (Motion.LeaveMM(kv.Key) >= 0 ? ", estimate " + (Motion.LeaveMM(kv.Key) / 60000.0).ToString("0.0") + " h" : ""));
             MapManager.setLogicSpeed(1f); MapManager.pauseLogic();
