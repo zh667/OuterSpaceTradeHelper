@@ -9,6 +9,7 @@ namespace TradeHelper.Ui
     public class Column<T>
     {
         public string title;
+        public string tip;                  // explanation shown when the mouse is over the header (Glossary.Apply fills it)
         public float width;
         public Func<T, string> text;
         public Func<T, IComparable> key;     // null = not sortable
@@ -90,6 +91,13 @@ namespace TradeHelper.Ui
                 var t = Kit.Txt(hrt, c.title, 16, Theme.Text, c.align, null, 11);
                 Kit.Stretch(t.rectTransform, 4, 0, 4, 0);
                 headers.Add(t);
+                // The explanation shows over the whole header cell (pointer events reach the cell from its children).
+                if (!string.IsNullOrEmpty(c.tip))
+                {
+                    if (c.key == null) Kit.Img(hrt, Theme.White, new Color(0, 0, 0, 0), true);
+                    var th = hrt.gameObject.AddComponent<TipOnHover>();
+                    th.text = t; th.explain = c.tip;
+                }
                 if (c.key != null)
                 {
                     var hit = Kit.Img(hrt, Theme.White, new Color(0, 0, 0, 0), true);

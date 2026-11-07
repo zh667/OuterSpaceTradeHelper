@@ -21,6 +21,31 @@ namespace TradeHelper
         public double Gain => double.IsNaN(unit) ? double.NaN : sells ? (double.IsNaN(best) ? double.NaN : best - unit) : (double.IsNaN(best) ? unit : unit - best);
     }
 
+    // One galaxy in the smuggler forecast.
+    public class SmugglerSpot
+    {
+        public const int Here = 0, Due = 1, Wait = 2, Unknown = 3, Never = 4;
+        public string galaxyId, galaxyName, smuggler;
+        public double fleetAu = -1;
+        public int state, observe;
+        public long waitMM, leftMM = -1;
+        public string NotVisitedTag => observe >= 2 ? "" : observe >= 1 ? "（未探索）" : "（未发现）";
+        public string StateText
+        {
+            get
+            {
+                switch (state)
+                {
+                    case Here: return "有：" + smuggler;
+                    case Due: return "进星系画面就刷 1 支";
+                    case Wait: return "要等";
+                    case Never: return "不会刷（没有贸易市场）";
+                    default: return "不确定（读不到市场条件）";
+                }
+            }
+        }
+    }
+
     public class CaravanInfo
     {
         public long uid;                 // the fleet's uid
@@ -137,6 +162,70 @@ namespace TradeHelper
                 double x = a.fleetAu < 0 ? double.MaxValue : a.fleetAu, y = b.fleetAu < 0 ? double.MaxValue : b.fleetAu;
                 return x.CompareTo(y);
             });
+            try { Forecast(gd, snap, repo, observe); }
+            catch (Exception e) { snap.errors.Add("走私船预测失败: " + e.Message); }
+        }
+
+        // Where a smuggler can appear. The game checks a galaxy when the galaxy view of the player's fleet's galaxy is
+        // built (GalaxySceneInterface -> NomadicFleetSpawnService.RefreshForPlayerGalaxy): when its next check time
+        // (FWGalaxy.nextNomadicFleetRefreshTime) has come, and the galaxy has no smuggler (nomadic, not settled, activity
+        // type 8), and it can host one (GalaxyFleetTradeMarketPolicy.CanCreate: a galaxy market and an economic
+        // spaceport), it creates one; then the next check is 5 game days later (NomadicFleetSpawnRules.RefreshInterval).
+        static System.Reflection.MethodInfo canCreate;
+        static bool canCreateLooked;
+        static int CanHost(FWGameData gd, string galaxyId)
+        {
+            if (!canCreateLooked)
+            {
+                canCreateLooked = true;
+                var t = typeof(FWGameData).Assembly.GetType("GalaxyFleetTradeMarketPolicy");
+                canCreate = t?.GetMethod("CanCreate", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public, null, new[] { typeof(FWGameData), typeof(string), typeof(int) }, null);
+            }
+            if (canCreate == null) return -1;
+            try { return (bool)canCreate.Invoke(null, new object[] { gd, galaxyId, (int)GalaxyNPCFleetType.Smuggler }) ? 1 : 0; }
+            catch { return -1; }
+        }
+
+        public const long RefreshIntervalMM = 7200000L;   // NomadicFleetSpawnRules.RefreshInterval: 5 game days
+
+        static void Forecast(FWGameData gd, Snapshot snap, List<FWFactionFleet> repo, Dictionary<string, int> observe)
+        {
+            snap.smugglerSpots.Clear();
+            var gals = gd.galaxyBlock?.knownGalaxies;
+            if (gals == null) return;
+            long now = gd.elapsedMM;
+            var active = new Dictionary<string, FWFactionFleet>();
+            foreach (var f in repo)
+            {
+                if (f == null || f.resultSettled || !f.IsNomadicOwned || string.IsNullOrEmpty(f.galaxyId)) continue;
+                G_ForceFleetType_Def d = null;
+                try { d = ImplDef<G_ForceFleetType_Def>.getDataID(f.gForceFleetTypeResId); } catch { }
+                if (d != null && d.ActivityType == (int)GalaxyNPCFleetType.Smuggler && !active.ContainsKey(f.galaxyId)) active[f.galaxyId] = f;
+            }
+            foreach (var g in gals)
+            {
+                if (g == null || string.IsNullOrEmpty(g.id)) continue;
+                var s = new SmugglerSpot { galaxyId = g.id, galaxyName = snap.GalaxyName(g.id), fleetAu = snap.RouteAu(snap.fleetGalaxyId, g.id), observe = g.observaState };
+                FWFactionFleet sm;
+                if (active.TryGetValue(g.id, out sm))
+                {
+                    s.state = SmugglerSpot.Here;
+                    var c = snap.caravans.Find(x => x.uid == sm.uid);
+                    s.smuggler = c != null ? c.FullName : sm.Name;
+                    s.leftMM = sm.activityDisappearTime > 0 ? Math.Max(0, sm.activityDisappearTime - now) : -1;
+                }
+                else
+                {
+                    int host = CanHost(gd, g.id);
+                    if (host == 0) s.state = SmugglerSpot.Never;
+                    else
+                    {
+                        s.waitMM = Math.Max(0, g.nextNomadicFleetRefreshTime - now);
+                        s.state = host < 0 ? SmugglerSpot.Unknown : s.waitMM == 0 ? SmugglerSpot.Due : SmugglerSpot.Wait;
+                    }
+                }
+                snap.smugglerSpots.Add(s);
+            }
         }
 
         // The fleet's duty, as the game resolves it for faction fleets (NomadicFleetSpawnService.ResolveFleetType).
@@ -165,11 +254,11 @@ namespace TradeHelper
             if (f.activityAppearTime > now) c.status = "还没出现（约 " + Math.Max(1, (f.activityAppearTime - now) / GameHourMM) + " 小时后）";
             else c.status = f.journey != null ? "跨星系航行中（位置会变）" : "在这个星系里";
             if (c.kept)
-                c.priceNote = "它现在不在场景里（打开它所在星系的星系地图才会出场），下面是上次出场时的货和价格，出场后可能已经变了；不在场景里时不能交易";
+                c.priceNote = "它现在不在场景里（舰队在它所在的星系、进入星系画面时才会出场：左上角“至星系”，F11；星域图拉近看到的星系里没有 NPC 舰队），下面是上次出场时的货和价格，出场后可能已经变了；不在场景里时不能交易";
             if (car == null)
             {
                 c.relation = "—";
-                c.priceNote = "还没出场：游戏只在你打开它所在星系的星系地图（开着舰队的那个画面）时才把它放进场景、生成它的货；在母舰（星舰）画面里不会。打开星系地图后点“刷新”。出场后它会用商人的名字显示";
+                c.priceNote = "还没出场：游戏只在你的舰队在它所在的星系、并且进入星系画面（左上角“至星系”，F11）时才把它放进场景、生成它的货；母舰画面、星域图（F12）拉近看到的星系里都不会。进去后点“刷新”，或在本页点“追踪”再点“定位追踪的商队”自动进去。出场后它会用商人的名字显示";
                 return c;
             }
             // The fleet's relation record with the player's fleet, read without creating one (FWFleet.getFleetRelation
@@ -539,7 +628,7 @@ namespace TradeHelper
                 c.lines.Add(line);
             }
             c.smugglerSaleTotal = all; c.smugglerSaleKinds = kinds; c.smugglerSold = sold; c.smugglerListSize = d.buys.Count;
-            if (car == null) c.priceNote = "还没出场（打开它所在星系的星系地图它才会出现）；对话里的买卖价格是固定的，这里先列出来";
+            if (car == null) c.priceNote = "还没出场（舰队在它所在的星系、进入星系画面时它才会出现：左上角“至星系”，F11）；对话里的买卖价格是固定的，这里先列出来";
             else if (npc < 0) c.priceNote = Join(c.priceNote, "读不到它的编号，“只卖/只收一次”的状态未知");
         }
 

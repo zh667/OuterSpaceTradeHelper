@@ -140,9 +140,10 @@ namespace TradeHelper
             }
             if (gd == null) return;
             long v = gd.TradeTransactionVersion, cr = gd.creditPoint;
+            bool tookByDialogue = WatchDialogue(gd, cr);
             if (v != lastVersion)
             {
-                Record(gd, cr - lastCredits, v - lastVersion);
+                if (!tookByDialogue) Record(gd, cr - lastCredits, v - lastVersion);
                 lastVersion = v;
             }
             lastCredits = cr;
@@ -250,6 +251,116 @@ namespace TradeHelper
                 Debug.LogWarning("[TradeHelper] ledger bill: " + (e.InnerException ?? e));
             }
             finally { GameLock.Exit(gd); }
+        }
+
+        // ---- Deals in a dialogue with an NPC fleet (smuggler deals, a caravan's "buy a navigation core"...) ----
+        // The game runs them as dialogue scripts: they add or remove items in the fleet's hold and add credits
+        // (ET_CSAPI.player_additem / player_addcredit), with no checkout. While such a dialogue is open
+        // (GalaxyEventsDialog.instance with a fleet NPC), the mod keeps a copy of the hold's counts; when the credits
+        // change it records what the hold gained and lost, priced with the smuggler's fixed deals (read from the game's
+        // dialogue scripts) and checked against the credits that actually changed.
+        public static Func<string, string> galaxyName = id => id;
+        static long dlgNpc = -1;
+        static Dictionary<string, int> dlgHold;
+        static long dlgCredits;
+        static string dlgMarket;
+        static long dlgFleetUid;
+        static bool dlgSmuggler;
+
+        static Dictionary<string, int> HoldCounts(FWGameData gd)
+        {
+            var d = new Dictionary<string, int>();
+            var things = gd.galaxyBlock?.playerFleet?.getThings();
+            if (things == null) return d;
+            foreach (var b in things)
+            {
+                string k = Caravans.ItemKey(b);
+                if (k == null) continue;
+                int n = b is FWThingBean t ? t.getSum() : 1;
+                int o; d.TryGetValue(k, out o); d[k] = o + n;
+            }
+            return d;
+        }
+
+        // True when this frame's credit change was recorded as a dialogue deal.
+        static bool WatchDialogue(FWGameData gd, long cr)
+        {
+            TK_NPCSetBean nb = null;
+            try { var dlg = GalaxyEventsDialog.instance; if (dlg != null && dlg && dlg.gameObject.activeInHierarchy) nb = dlg.NpcBean; } catch { }
+            FWFleet fl = null;
+            try { fl = (nb as TK_NPCSetBean_Fleet)?.getFleetBean()?.bean; } catch { }
+            if (fl == null) { dlgNpc = -1; dlgHold = null; return false; }
+            long npc = -1;
+            try { npc = nb.getNpcUid(); } catch { }
+            if (npc != dlgNpc || dlgHold == null)
+            {
+                // A new dialogue: copy the hold (under the game's locks; when they are busy, next frame).
+                if (!GameLock.TryEnter(gd)) return false;
+                try
+                {
+                    dlgHold = HoldCounts(gd);
+                    dlgCredits = cr; dlgNpc = npc; dlgFleetUid = fl.getUid();
+                    GalaxyNPCFleetType t; string why;
+                    dlgSmuggler = FleetPlayerAntiDisturbService.TryResolveType(fl, out t, out why) && t == GalaxyNPCFleetType.Smuggler;
+                    string g = fl.pos?.galaxyId;
+                    dlgMarket = (dlgSmuggler ? "走私船 " : "商队 ") + (string.IsNullOrEmpty(fl.name) ? "?" : fl.name) + "（" + (galaxyName(g) ?? g) + "）对话";
+                }
+                catch (Exception e) { dlgHold = null; Debug.LogWarning("[TradeHelper] ledger dialogue: " + e.Message); }
+                finally { GameLock.Exit(gd); }
+                return false;
+            }
+            if (cr == dlgCredits) return false;
+            if (!GameLock.TryEnter(gd)) return false;
+            Dictionary<string, int> now;
+            try { now = HoldCounts(gd); }
+            catch (Exception e) { Debug.LogWarning("[TradeHelper] ledger dialogue: " + e.Message); return false; }
+            finally { GameLock.Exit(gd); }
+            RecordDialogue(gd, cr - dlgCredits, dlgHold, now);
+            dlgHold = now; dlgCredits = cr;
+            return true;
+        }
+
+        static void RecordDialogue(FWGameData gd, long delta, Dictionary<string, int> before, Dictionary<string, int> after)
+        {
+            var e = new LedgerEntry { time = DateTime.Now.ToString("MM-dd HH:mm:ss"), creditDelta = delta, marketUid = -Math.Abs(dlgFleetUid), market = dlgMarket };
+            try { e.gameMM = gd.elapsedMM; } catch { }
+            var keys = new HashSet<string>(before.Keys); keys.UnionWith(after.Keys);
+            var deals = dlgSmuggler ? Caravans.Deals() : null;
+            double sum = 0; bool priced = true;
+            foreach (var k in keys)
+            {
+                int b0, a0; before.TryGetValue(k, out b0); after.TryGetValue(k, out a0);
+                int d = a0 - b0;
+                if (d == 0) continue;
+                var li = new LedgerItem { key = k, name = goodsName(k) ?? k, buy = d > 0, qty = Math.Abs(d) };
+                double price = double.NaN;
+                if (deals != null)
+                {
+                    if (d < 0)
+                    {
+                        foreach (var kv in deals.buys) if (kv.Key == k) { price = Math.Floor(-d * kv.Value * deals.rate); break; }
+                    }
+                    else
+                    {
+                        foreach (var o in deals.sells) if (o.type + "_" + o.id == k && o.count == d) { price = -o.cost; break; }
+                    }
+                }
+                if (double.IsNaN(price)) priced = false; else { li.net = price; li.raw = Math.Abs(price); sum += price; }
+                e.items.Add(li);
+            }
+            // One goods line and no fixed deal: the whole credit change is that line's price.
+            if (!priced && e.items.Count == 1) { e.items[0].net = delta; e.items[0].raw = Math.Abs(delta); priced = true; sum = delta; }
+            e.billDelta = (long)Math.Round(sum);
+            e.exact = priced && e.items.Count > 0 && e.billDelta == delta;
+            if (e.items.Count == 0) e.note = "对话里的收支，货舱里的货没变（议价、勒索、任务奖励之类）";
+            else if (!priced) e.note = "对话交易：货舱的变化记下了，但模组不知道每样的单价";
+            else if (!e.exact) e.note = "对话交易：按走私船的固定价算应为 " + e.billDelta + "，实际 " + delta + "（差 " + (delta - e.billDelta) + "；同种货分成几堆时游戏会少付）";
+            else e.note = dlgSmuggler ? "走私船对话里的固定买卖（不扣税）" : "对话交易";
+            entries.Add(e);
+            pending.Add(e);
+            version++;
+            Save();
+            Debug.Log("[TradeHelper] dialogue deal recorded: " + e.market + " credits " + delta + " items " + e.items.Count + (e.exact ? " exact" : " (" + e.note + ")"));
         }
 
         static string Key(StorageItemInstance it) => it.RawData is FWThingBean t ? t.type + "_" + t.id : "item" + it.ItemID;

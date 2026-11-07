@@ -63,6 +63,7 @@ namespace TradeHelper.Ui
                 new Column<TradeIdea> { title = "", width = 74, buttonText = t => Tracked(t) ? "追踪中" : "追踪", buttonEnabled = t => !Tracked(t),
                     onButton = t => { if (snap != null) Plans.FromTrade(t, snap, cfg, host.settlement); host.PlansChanged(); } },
             };
+            Glossary.Apply(cols);
             table = new Table<TradeIdea>(root, 0, 60, w.BodyW, w.BodyH - 60, cols, cfg.tradesSort, cfg.tradesDesc);
             table.emptyText = DefaultEmpty;
             Current = this;
@@ -146,6 +147,7 @@ namespace TradeHelper.Ui
                 new Column<SellIdea> { title = "", width = 74, buttonText = s => SellTracked(s) ? "追踪中" : "追踪", buttonEnabled = s => !SellTracked(s),
                     onButton = s => { if (snap != null) Plans.FromSell(s, snap, cfg, host.settlement); host.PlansChanged(); } },
             };
+            Glossary.Apply(cols);
             table = new Table<SellIdea>(root, 0, 60, w.BodyW, w.BodyH - 60, cols, cfg.sellsSort, cfg.sellsDesc);
             table.filter = s => WithinLy(s.fleetAu, cfg.maxFleetLy) && (category == null || s.category == category) && Match(search, s.name, s.location, s.market.market.name);
             table.sortChanged = (c, d) => SaveSort();
@@ -190,6 +192,7 @@ namespace TradeHelper.Ui
                 new Column<MarketInfo> { title = "税", width = 56, text = m => (m.tax * 100).ToString("0") + "%", key = m => m.tax, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<MarketInfo> { title = "距舰队", width = 130, text = m => Fmt.Dist(m.fleetAu), key = m => m.fleetAu < 0 ? (IComparable)null : m.fleetAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
             };
+            Glossary.Apply(mcols);
             markets = new Table<MarketInfo>(root, 0, 40, LW, w.BodyH - 40, mcols, cfg.marketsSort, cfg.marketsDesc);
             markets.onRowClick = m => { selected = m; selectedUid = m.uid; ShowGoods(); };
             markets.isSelected = m => m.uid == selectedUid;
@@ -222,6 +225,7 @@ namespace TradeHelper.Ui
                 new Column<GoodsQuote> { title = "违禁", width = 56, text = q => q.contraband ? "违禁" : "", key = q => q.contraband ? 1 : 0, numeric = true, color = _ => Theme.Bad },
                 new Column<GoodsQuote> { title = "价格", width = 60, text = q => q.exact ? "实时" : "估", key = q => q.exact ? 0 : 1, numeric = true, color = q => q.exact ? Theme.Good : Theme.Warn },
             };
+            Glossary.Apply(gcols);
             goods = new Table<GoodsQuote>(root, gx, 82, gw, w.BodyH - 82, gcols, cfg.goodsSort, cfg.goodsDesc);
             goods.emptyText = "先在左边选一个站；“未开过”的站可以在“后台补算”页初始化。";
             goods.filter = q => (!cfg.goodsBuyableOnly || q.buyable) && (!cfg.hideContraband || !q.contraband) && (category == null || q.category == category) && Match(search, q.name);
@@ -263,6 +267,7 @@ namespace TradeHelper.Ui
     {
         public static CaravansView Current;
         readonly Table<CaravanInfo> list;
+        readonly Table<SmugglerSpot> spots;
         readonly Table<CaravanLine> lines;
         readonly TextMeshProUGUI head;
         CaravanInfo selected;
@@ -277,6 +282,11 @@ namespace TradeHelper.Ui
             return h >= 24 ? (h / 24) + " 天 " + (h % 24) + " 小时" : h + " 小时";
         }
 
+        // The game ends a caravan or smuggler at its disappear time or when it has flown its whole route in the galaxy
+        // view (GalaxyNPCFleet.OnPathCompleted -> settled "NaturalComplete"), whichever comes first; the second can be
+        // much earlier, and a fleet that comes into the scene long after it appeared may end right away.
+        static string LeaveNote(CaravanInfo c) => c.leftMM < 0 ? "" : "（跑完航线会提前走）";
+
         static string Price(double v) => double.IsNaN(v) ? "—" : Fmt.Money(v);
 
         public CaravansView(Window w, RectTransform body, Config cfg, TradeHelperBehaviour host) : base(w, body, cfg, host)
@@ -284,22 +294,44 @@ namespace TradeHelper.Ui
             const float LW = 590;
             Current = this;
             Kit.TxtAt(root, "商队（点击查看）", 0, 0, LW - 300, 30, 17, Theme.Text);
-            Kit.Button(root, "定位追踪的商队", LW - 290, 0, 150, 30, () => { if (!Tracker.Focus()) FairyUIDispatcher.showToast(Tracker.uid < 0 ? "还没有追踪商队：点列表里的“追踪”" : "它不在场景里：你的舰队要在它所在的星系，它才会出现"); });
+            Kit.Button(root, "定位追踪的商队", LW - 290, 0, 150, 30, () => { if (!Tracker.Focus()) FairyUIDispatcher.showToast(Tracker.uid < 0 ? "还没有追踪商队：点列表里的“追踪”" : "它在 " + Tracker.galaxyName + "，不在你舰队所在的星系：舰队到那个星系后才能定位"); });
             Kit.Button(root, "停止追踪", LW - 132, 0, 132, 30, () => { Tracker.Stop(); list.Bind(); });
             var ccols = new List<Column<CaravanInfo>>
             {
                 new Column<CaravanInfo> { title = "商队", width = 170, text = c => (c.black ? "走私 · " : "") + c.FullName, key = c => c.name, color = c => c.black ? Theme.Warn : Theme.Text },
                 new Column<CaravanInfo> { title = "星系", width = 110, text = c => c.galaxyName + c.NotVisitedTag, key = c => c.galaxyName, color = c => c.observe >= 2 ? Theme.Text : Theme.Text2 },
                 new Column<CaravanInfo> { title = "距舰队", width = 90, text = c => Fmt.Dist(c.fleetAu), key = c => c.fleetAu < 0 ? (IComparable)null : c.fleetAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
-                new Column<CaravanInfo> { title = "还剩", width = 90, text = c => Left(c.leftMM), key = c => c.leftMM < 0 ? long.MaxValue : c.leftMM, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<CaravanInfo> { title = "最多还剩", width = 90, text = c => Left(c.leftMM), key = c => c.leftMM < 0 ? long.MaxValue : c.leftMM, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<CaravanInfo> { title = "关系", width = 60, text = c => c.present ? c.relation : c.kept ? "不在场景" : "未出场", key = c => c.relation, color = c => c.hostile ? Theme.Bad : Theme.Text2 },
                 new Column<CaravanInfo> { title = "", width = 70, buttonText = c => Tracker.IsTracked(c.uid) ? "追踪中" : "追踪", buttonPrimary = c => Tracker.IsTracked(c.uid),
                     onButton = c => { if (Tracker.IsTracked(c.uid)) Tracker.Stop(); else Tracker.Track(c); } },
             };
-            list = new Table<CaravanInfo>(root, 0, 40, LW, w.BodyH - 40, ccols, 2, false);
+            Glossary.Apply(ccols);
+            // Top: the caravans there are; below: where a smuggler can appear.
+            float listH = Mathf.Max(200, (w.BodyH - 40) * 0.45f);
+            list = new Table<CaravanInfo>(root, 0, 40, LW, listH, ccols, 2, false);
             list.onRowClick = c => { selected = c; selectedUid = c.uid; ShowLines(); };
             list.isSelected = c => c.uid == selectedUid;
             list.emptyText = "现在没有能交易的商队。商队和可疑商队（走私船）是临时出现的 NPC 舰队，过一段时间会离开；走私船每个星系最多一支，而且不常有。";
+
+            float fy = 40 + listH + 10;
+            var ftitle = Kit.TxtAt(root, "走私船预测  <size=14><color=#A4A5A6>鼠标停在这里看规则 · 只在舰队进入星系画面（F11）时刷</color></size>", 0, fy, LW, 30, 17, Theme.Text);
+            ftitle.raycastTarget = true;
+            ftitle.gameObject.AddComponent<TipOnHover>().text = ftitle;
+            ftitle.GetComponent<TipOnHover>().explain = Glossary.SmugglerRule;
+            var scols = new List<Column<SmugglerSpot>>
+            {
+                new Column<SmugglerSpot> { title = "星系", width = 150, text = x => x.galaxyName + x.NotVisitedTag, key = x => x.galaxyName, color = x => x.observe >= 2 ? Theme.Text : Theme.Text2 },
+                new Column<SmugglerSpot> { title = "距舰队", width = 100, text = x => Fmt.Dist(x.fleetAu), key = x => x.fleetAu < 0 ? (IComparable)null : x.fleetAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
+                new Column<SmugglerSpot> { title = "走私船", width = 200, text = x => x.StateText, key = x => x.state * 1000000000L + x.waitMM, numeric = true,
+                    color = x => x.state == SmugglerSpot.Here ? Theme.Warn : x.state == SmugglerSpot.Due ? Theme.Good : Theme.Text2 },
+                new Column<SmugglerSpot> { title = "什么时候", width = 120, text = x => x.state == SmugglerSpot.Here ? "最多还剩 " + Left(x.leftMM) : x.state == SmugglerSpot.Wait ? Left(x.waitMM) + "后" : x.state == SmugglerSpot.Due ? "现在" : "",
+                    key = x => x.state == SmugglerSpot.Here ? -1 : x.state == SmugglerSpot.Due ? 0 : x.state == SmugglerSpot.Wait ? x.waitMM : long.MaxValue, numeric = true, align = TextAlignmentOptions.MidlineRight },
+            };
+            Glossary.Apply(scols, "smuggler");
+            spots = new Table<SmugglerSpot>(root, 0, fy + 34, LW, w.BodyH - fy - 34, scols, 1, false);
+            spots.filter = x => x.state != SmugglerSpot.Never;
+            spots.emptyText = "没有能刷走私船的星系（要有贸易市场）";
 
             float gx = LW + 16, gw = w.BodyW - gx;
             Kit.Toggle(root, "它卖的", gx, 1, 100, showSells, v => { showSells = v; lines.Resort(); });
@@ -322,6 +354,7 @@ namespace TradeHelper.Ui
                     key = l => double.IsNaN(l.Gain) ? (IComparable)null : l.Gain, numeric = true, align = TextAlignmentOptions.MidlineRight, color = l => double.IsNaN(l.Gain) ? Theme.Text2 : l.Gain > 0 ? Theme.Accent : Theme.Text2 },
                 new Column<CaravanLine> { title = "说明", width = 260, text = l => l.note, key = null, color = _ => Theme.Text2 },
             };
+            Glossary.Apply(lcols);
             lines = new Table<CaravanLine>(root, gx, 130, gw, w.BodyH - 130, lcols, 8, true);
             lines.filter = l => l.sells ? showSells : showBuys;
             lines.emptyText = "先在左边选一支商队。";
@@ -333,23 +366,23 @@ namespace TradeHelper.Ui
             var c = selected;
             if (c.smuggler)
             {
-                head.text = "<b>黑潮走私船  " + c.FullName + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    还剩 " + Left(c.leftMM)
+                head.text = "<b>黑潮走私船  " + c.FullName + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    最多还剩 " + Left(c.leftMM) + LeaveNote(c)
                     + "\n<size=13><color=#A4A5A6>走私船没有交易窗口，只能在对话里选固定的买卖：买方铀矿石、氦-3（每支船各卖一次）、导航核心；"
                     + "“出售货舱里的可疑货物”会把舰队货舱里它清单上的货（辐射物、器官和义体、舰炮、生物材料，共 " + c.smugglerListSize + " 种）一次全卖掉，每个按固定基价 ×2，不扣税，每支船只收一次。"
                     + (c.smugglerSold ? "<color=#D8982F>这支船已经收过一次。</color>" : c.smugglerSaleKinds > 0 ? "现在卖给它：" + c.smugglerSaleKinds + " 种货，一共 " + Fmt.Money(c.smugglerSaleTotal) + "。" : "你舰队货舱里现在没有它收的货（下面数量为 0 的就是它收的）。")
-                    + "不进结账记录（游戏不把对话买卖算作结账）。"
+                    + "对话里的买卖会记进“结账记录”（按货舱的增减和固定价，和信用点核对）。"
                     + (string.IsNullOrEmpty(c.priceNote) ? "" : "  <color=#D8982F>" + c.priceNote + "</color>") + "</color></size>";
                 lines.SetData(c.lines);
                 return;
             }
             if (!c.present && c.lines.Count == 0)
             {
-                head.text = "<b>" + c.kind + "  " + c.FullName + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    还剩 " + Left(c.leftMM)
+                head.text = "<b>" + c.kind + "  " + c.FullName + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    最多还剩 " + Left(c.leftMM) + LeaveNote(c)
                     + "\n<size=13><color=#D8982F>" + c.priceNote + "</color></size>";
                 lines.SetData(c.lines);
                 return;
             }
-            head.text = "<b>" + c.kind + "  " + c.FullName + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    还剩 " + Left(c.leftMM)
+            head.text = "<b>" + c.kind + "  " + c.FullName + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    最多还剩 " + Left(c.leftMM) + LeaveNote(c)
                 + "\n<size=13><color=#A4A5A6>商队资金 " + Fmt.Money(c.cash) + "  ·  税 " + (c.tax * 100).ToString("0") + "%（按来源站 " + c.source + "）  ·  价格系数 " + c.priceModifier + "%"
                 + (c.metPlayer ? "" : "（还没打过交道，按游戏默认）") + "：买它的货 ×" + c.FactorBuy.ToString("0.##") + "，卖给它 ×" + c.FactorSell.ToString("0.##")
                 + "\n怎么交易：舰队飞到它旁边，点它对话，选“查看货物清单”；“与对方议价”可能压低价格系数，这里会跟着变。通缉值高了它会拒绝交易。卖给商队的货不检查违禁。“它收你的”里数量为 0 的是它收、但你舰队背包里没有的货。"
@@ -365,6 +398,7 @@ namespace TradeHelper.Ui
         {
             base.OnSnapshot(s);
             list.SetData(s.caravans);
+            spots.SetData(s.smugglerSpots);
             selected = s.caravans.Find(c => c.uid == selectedUid);
             if (selected == null && s.caravans.Count > 0) { selected = s.caravans[0]; selectedUid = selected.uid; }
             ShowLines();
@@ -403,6 +437,7 @@ namespace TradeHelper.Ui
                 new Column<Row> { title = "首件到手", width = 130, text = r => r.best != null ? Fmt.Money(r.best.firstUnitNet) : "-", key = r => r.best != null ? (IComparable)r.best.firstUnitNet : null, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<Row> { title = "首件 × 数量", width = 140, text = r => r.best != null ? Fmt.Money(r.best.firstUnitNet * r.qty) : "-", key = r => r.best != null ? (IComparable)(r.best.firstUnitNet * r.qty) : null, numeric = true, align = TextAlignmentOptions.MidlineRight },
             };
+            Glossary.Apply(cols);
             table = new Table<Row>(root, 0, 40, w.BodyW, w.BodyH - 40, cols, cfg.invSort, cfg.invDesc);
             table.filter = r => (location == null || r.location == location) && (category == null || r.category == category) && Match(search, r.name);
             table.sortChanged = (c, d) => { cfg.invSort = c; cfg.invDesc = d; cfg.Save(); };
@@ -511,6 +546,7 @@ namespace TradeHelper.Ui
                 new Column<Station> { title = "保持实时", width = 120, checkGet = s => cfg.keepFresh.Contains(s.uid),
                     checkSet = (s, v) => { if (v) { if (!cfg.keepFresh.Contains(s.uid)) cfg.keepFresh.Add(s.uid); host.settlement.Enqueue(s.uid); } else cfg.keepFresh.Remove(s.uid); cfg.Save(); } },
             };
+            Glossary.Apply(cols, "catchup");
             table = new Table<Station>(root, 0, 100, w.BodyW, w.BodyH - 100, cols, cfg.settleSort, cfg.settleDesc);
             table.sortChanged = (c, d) => { cfg.settleSort = c; cfg.settleDesc = d; cfg.Save(); };
             table.filter = s => show == 0 || (show == 1 && !s.Initialized) || (show == 2 && s.Initialized && s.Pending > 0) || (show == 3 && s.Initialized && s.Pending == 0) || (show == 4 && cfg.keepFresh.Contains(s.uid)) || (show == 5 && !s.discovered);
@@ -743,6 +779,7 @@ namespace TradeHelper.Ui
                     } },
                 new Column<Plan> { title = "", width = 60, buttonText = _ => "删除", onButton = p => { Plans.Remove(p, cfg); if (selected == p) selected = null; Refresh(); } },
             };
+            Glossary.Apply(cols, "plans");
             table = new Table<Plan>(root, 0, 70, w.BodyW, w.BodyH - 70, cols, 2, false);
             table.emptyText = "还没有追踪的计划。在“跑商建议”或“卖库存”里点「追踪」。";
             table.filter = p => show == 1 || (show == 0 && p.state != 2) || (show == 2 && p.state == 2);
@@ -894,6 +931,7 @@ namespace TradeHelper.Ui
                 new Column<Row> { title = "核对", width = 70, text = r => r.e.exact ? "精确" : "估", key = r => r.e.exact, color = r => r.e.exact ? Theme.Good : Theme.Warn },
                 new Column<Row> { title = "说明", width = 400, text = r => r.e.note ?? (r.e.tax > 0 ? "市场税 " + (r.e.tax * 100).ToString("0") + "%" : ""), key = null, color = r => Theme.Text2 },
             };
+            Glossary.Apply(cols);
             table = new Table<Row>(root, 0, 66, w.BodyW, w.BodyH - 66, cols, 0, true);
             table.emptyText = "还没有结账记录。在贸易市场买卖一次就会出现在这里。";
         }

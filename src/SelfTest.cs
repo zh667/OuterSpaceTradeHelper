@@ -1150,11 +1150,122 @@ namespace TradeHelper
             if (snap.caravans.Count == 0) { c.passed = false; c.summary = "no caravan in the test save"; yield break; }
             // Caravans get their goods when the game puts them in the scene: open the galaxy the fleet is in, as the
             // player does, and wait for the scene's fleets.
+            // The player's path that showed nothing: the star field (至星域) zoomed onto the fleet's galaxy has no NPC
+            // fleets; the galaxy scene (至星系) does. Go to the star field the way the button does, check nothing is in
+            // the scene there and the tracker says so, then let the tracker's "locate" enter the galaxy scene.
+            {
+                Func<string> stateNow = () => { try { return Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance?.CurState.ToString() ?? "no galaxy scene"; } catch (Exception e) { return e.Message; } };
+                c.details.Add("start: scene state " + stateNow() + ", " + present + " present in the save");
+                string fg0 = snap.fleetGalaxyId;
+                var spot0 = snap.smugglerSpots.Find(x => x.galaxyId == fg0);
+                long next0 = -1; int smugglers0 = 0;
+                Locked(() =>
+                {
+                    var g0 = gd.getGalaxy(fg0); if (g0 != null) next0 = g0.nextNomadicFleetRefreshTime;
+                    foreach (var f in gd.factionFleetRepository)
+                        if (f != null && !f.resultSettled && f.IsNomadicOwned && f.galaxyId == fg0 && ImplDef<G_ForceFleetType_Def>.getDataID(f.gForceFleetTypeResId)?.ActivityType == (int)GalaxyNPCFleetType.Smuggler) smugglers0++;
+                });
+                if (spot0 != null && spot0.state == SmugglerSpot.Wait && smugglers0 == 0)
+                {
+                    // Test copy only: bring this galaxy's next check to now, so entering it spawns a smuggler for the
+                    // dialogue test; the forecast must follow.
+                    string before = spot0.StateText + " " + Ui.CaravansView.Left(spot0.waitMM);
+                    Locked(() => { var g0 = gd.getGalaxy(fg0); if (g0 != null) g0.nextNomadicFleetRefreshTime = gd.elapsedMM; });
+                    yield return Refresh(); snap = host.Latest;
+                    spot0 = snap.smugglerSpots.Find(x => x.galaxyId == fg0);
+                    Locked(() => { var g0 = gd.getGalaxy(fg0); if (g0 != null) next0 = g0.nextNomadicFleetRefreshTime; });
+                    c.details.Add("test copy: next smuggler check in " + fg0 + " set to now (forecast was " + before + ", now " + (spot0?.StateText ?? "missing") + ")");
+                }
+                c.details.Add("smuggler forecast for the fleet's galaxy " + fg0 + ": " + (spot0 == null ? "missing" : spot0.StateText + (spot0.state == SmugglerSpot.Wait ? " " + Ui.CaravansView.Left(spot0.waitMM) : "")) + "; save: next check in " + ((next0 - gd.elapsedMM) / 60000.0).ToString("0.0") + " h, smugglers there " + smugglers0 + "; " + snap.smugglerSpots.Count + " galaxies in the forecast, " + snap.smugglerSpots.FindAll(x => x.state == SmugglerSpot.Due).Count + " due, " + snap.smugglerSpots.FindAll(x => x.state == SmugglerSpot.Never).Count + " never");
+                if (stateNow() != "GalaxyField")
+                {
+                    try { MainUI_Head.GoGalaxyField(null); } catch (Exception e) { c.details.Add("GoGalaxyField failed: " + e.Message); }
+                    float tf = Time.realtimeSinceStartup;
+                    while (Time.realtimeSinceStartup - tf < 40 && stateNow() != "GalaxyField") yield return new WaitForSecondsRealtime(1);
+                }
+                yield return new WaitForSecondsRealtime(6);
+                yield return Refresh(); snap = host.Latest;
+                string fleetGalaxy = null;
+                try { fleetGalaxy = AirShipLocalData.Instance.getCurFleet().getGalaxyId(); } catch { }
+                var here = snap.caravans.FindAll(x => x.galaxyId == fleetGalaxy);
+                int inField = snap.caravans.FindAll(x => x.present).Count;
+                yield return Shot("star-field");
+                bool fieldOk = stateNow() == "GalaxyField" && inField == 0;
+                c.details.Add("star field: state " + stateNow() + ", caravans in the scene " + inField + " (expected 0), in the fleet's galaxy " + fleetGalaxy + ": " + here.Count + (fieldOk ? " ok" : " WRONG"));
+                ok &= fieldOk;
+                if (here.Count > 0)
+                {
+                    var tf0 = here.Find(x => x.black) ?? here[0];
+                    Func<long, string> fstate = uid =>
+                    {
+                        string r = "";
+                        Locked(() =>
+                        {
+                            string g; var ff = FactionFleetRegistryService.Find(gd, uid, out g);
+                            if (ff == null) { r = "gone from the fleet records"; return; }
+                            var mg = Script.FreeWorldAirShip.Galaxy.NPCFleet.GalaxyNPCFleetManager.Instance;
+                            bool admitted = false;
+                            try { var gs0 = GalaxyMapData.getInstance().getGalaxyStar(ff.galaxyId); admitted = gs0 != null && gs0.fwGalaxyBean.getFwGalaxy().GetAdmittedFleetBeanList().Exists(x => (x is FWFactionFleet xf && xf.getUid() == uid) || (x is FWFleet xl && xl.getUid() == uid)); } catch { }
+                            r = "galaxy " + ff.galaxyId + " settled " + ff.resultSettled + " presence " + ff.presenceMode + " docked " + ff.dockedSpaceportUid + " journey " + (ff.journey != null ? ff.journey.phase.ToString() : "none")
+                                + " external " + ff.HasExternalPresence + " admitted " + admitted + " scene object " + (ff.fleet != null) + " in the game's table " + (mg != null && mg.HasFleet(uid))
+                                + " leaves in " + (ff.activityDisappearTime > 0 ? ((ff.activityDisappearTime - gd.elapsedMM) / 60000.0).ToString("0.0") + " h" : "-") + " target " + ff.activityTargetKey;
+                        });
+                        return r;
+                    };
+                    long clock0 = gd.elapsedMM;
+                    foreach (var h in here) c.details.Add("before entering: " + h.FullName + " " + h.uid + ": " + fstate(h.uid));
+                    host.SetVisible(false);
+                    Ui.Tracker.Track(tf0, false);
+                    yield return null; yield return null;
+                    bool msgOk = !Ui.Tracker.Shown && Ui.Tracker.Status.Contains("至星系");
+                    c.details.Add("tracker in the star field: " + Ui.Tracker.Status + (msgOk ? " ok" : " WRONG"));
+                    ok &= msgOk;
+                    bool focused = Ui.Tracker.Focus();
+                    float tw = Time.realtimeSinceStartup;
+                    while (Time.realtimeSinceStartup - tw < 60 && !(Ui.Tracker.InGalaxyView && Ui.Tracker.Shown)) yield return new WaitForSecondsRealtime(1);
+                    yield return new WaitForSecondsRealtime(2);
+                    yield return Refresh(); snap = host.Latest;
+                    var tf1 = snap.caravans.Find(x => x.uid == tf0.uid);
+                    c.details.Add("game clock moved " + ((gd.elapsedMM - clock0) / 60000.0).ToString("0.00") + " h while entering");
+                    foreach (var h in here) c.details.Add("after entering: " + h.FullName + " " + h.uid + ": " + fstate(h.uid));
+                    bool enterOk = focused && Ui.Tracker.InGalaxyView && Ui.Tracker.Shown && tf1 != null && tf1.present;
+                    yield return Shot("located");
+                    c.details.Add("locate from the star field: Focus " + focused + ", state " + stateNow() + " after " + (Time.realtimeSinceStartup - tw).ToString("0") + " s, found " + Ui.Tracker.Found + ", " + tf0.FullName + " in the scene " + (tf1 != null && tf1.present) + "; " + Ui.Tracker.Status + (enterOk ? " ok" : " WRONG"));
+                    ok &= enterOk;
+                    Ui.Tracker.Stop();
+                }
+                else c.details.Add("no caravan in the fleet's galaxy: locate-from-star-field not checked");
+                if (stateNow() != "GalaxyScene")
+                {
+                    try { MainUI_Head.GoGalaxyFleet(); } catch (Exception e) { c.details.Add("GoGalaxyFleet failed: " + e.Message); }
+                    float tg = Time.realtimeSinceStartup;
+                    while (Time.realtimeSinceStartup - tg < 60 && stateNow() != "GalaxyScene") yield return new WaitForSecondsRealtime(1);
+                    yield return new WaitForSecondsRealtime(3);
+                }
+                {
+                    // The forecast came true: entering the galaxy view made the game check this galaxy.
+                    int smugglers1 = 0; long next1 = -1; string newName = null;
+                    Locked(() =>
+                    {
+                        var g1 = gd.getGalaxy(fg0); if (g1 != null) next1 = g1.nextNomadicFleetRefreshTime;
+                        foreach (var f in gd.factionFleetRepository)
+                            if (f != null && !f.resultSettled && f.IsNomadicOwned && f.galaxyId == fg0 && ImplDef<G_ForceFleetType_Def>.getDataID(f.gForceFleetTypeResId)?.ActivityType == (int)GalaxyNPCFleetType.Smuggler) { smugglers1++; newName = f.Name; }
+                    });
+                    bool fOk;
+                    string expect;
+                    if (spot0 == null) { fOk = false; expect = "no forecast"; }
+                    else if (spot0.state == SmugglerSpot.Due) { fOk = smugglers1 == 1 && next1 > next0; expect = "a smuggler appears and the next check moves 5 days on"; }
+                    else if (spot0.state == SmugglerSpot.Wait) { fOk = smugglers1 == smugglers0 && next1 == next0; expect = "nothing changes"; }
+                    else if (spot0.state == SmugglerSpot.Here) { fOk = smugglers1 >= 1; expect = "the smuggler is still listed"; }
+                    else if (spot0.state == SmugglerSpot.Never) { fOk = smugglers1 == 0; expect = "no smuggler"; }
+                    else { fOk = true; expect = "(unknown: not checked)"; }
+                    c.details.Add("forecast after entering the galaxy view (state " + stateNow() + "): smugglers there " + smugglers1 + (newName != null ? " (" + newName + ")" : "") + ", next check in " + ((next1 - gd.elapsedMM) / 60000.0).ToString("0.0") + " h; expected: " + expect + (fOk ? " ok" : " WRONG"));
+                    ok &= fOk;
+                }
+            }
             if (!snap.caravans.Exists(x => x.present))
             {
-                string st = "?";
-                try { st = Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance == null ? "no galaxy scene" : Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance.CurState.ToString(); } catch (Exception e) { st = e.Message; }
-                c.details.Add("none in the scene yet (" + present + " present in the save, scene state " + st + "); opening the fleet's galaxy");
+                c.details.Add("none in the scene yet (state " + (Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance?.CurState.ToString() ?? "?") + "); opening the fleet's galaxy");
                 try { AirShipUIUtils.ShowGalaxyFleet(); } catch (Exception e) { c.details.Add("ShowGalaxyFleet failed: " + e.Message); }
                 float tw = Time.realtimeSinceStartup;
                 while (Time.realtimeSinceStartup - tw < 60)
@@ -1202,14 +1313,88 @@ namespace TradeHelper
                 if (Ui.Tracker.OnScreen) where = Mathf.Abs(sp2.x - pr.x) < 1f && Mathf.Abs(sp2.y - pr.y) < 1f;
                 else
                 {
-                    var cdir = new Vector2(pr.x, pr.y) - center; var mdir = sp2 - center;
+                    var cdir = pr.z > 0 ? new Vector2(pr.x, pr.y) - center : Ui.Tracker.PlaneDirection(tcam, Ui.Tracker.FleetWorld); var mdir = sp2 - center;
                     bool onEdge = sp2.x <= 49 || sp2.x >= Screen.width - 49 || sp2.y <= 49 || sp2.y >= Screen.height - 49;
                     where = onEdge && Vector2.Dot(cdir.normalized, mdir.normalized) > 0.999f;
                 }
-                bool trackOk = Ui.Tracker.Found && Ui.Tracker.InGalaxyView && where;
+                bool trackOk = Ui.Tracker.Shown && Ui.Tracker.InGalaxyView && where;
                 c.details.Add("tracking " + tc.FullName + ": galaxy view " + Ui.Tracker.InGalaxyView + ", found " + Ui.Tracker.Found + ", on screen " + Ui.Tracker.OnScreen + ", marker " + Ui.Tracker.ScreenPos + " for projection " + Ui.Tracker.Projected + " (" + (Ui.Tracker.OnScreen ? "on screen" : "edge, towards it") + "); " + Ui.Tracker.Status + (trackOk ? " ok" : " WRONG"));
                 ok &= trackOk;
                 Ui.Tracker.Stop();
+            }
+
+            {
+                // The marker must follow a moving fleet. Run the game clock, take the scene fleet that moved the most
+                // (a caravan when one moves), track it and compare every half second: the marker against the game's
+                // projection of the fleet (or the screen edge towards it), and against its drawn ship models.
+                var follow = new Check { name = "tracking follows a moving fleet" };
+                result.checks.Add(follow);
+                var mgr = Script.FreeWorldAirShip.Galaxy.NPCFleet.GalaxyNPCFleetManager.Instance;
+                var start = new Dictionary<long, Vector3>();
+                foreach (var f in UnityEngine.Object.FindObjectsOfType<Script.FreeWorldAirShip.Galaxy.NPCFleet.GalaxyNPCFleet>())
+                    if (f != null && mgr != null && mgr.GetFleetByUid(f.FleetUId) == f) start[f.FleetUId] = f.transform.position;
+                float speed0 = MapManager.getLogicSpeed(); bool play0 = MapManager.isPlay;
+                MapManager.setLogicSpeed(5f);
+                yield return new WaitForSecondsRealtime(3);
+                long mover = -1; float best = 0; bool moverIsCaravan = false;
+                var cuids = new HashSet<long>(snap.caravans.ConvertAll(x => x.uid));
+                foreach (var kv in start)
+                {
+                    var f = mgr != null ? mgr.GetFleetByUid(kv.Key) : null;
+                    if (f == null) continue;
+                    float d = (f.transform.position - kv.Value).magnitude;
+                    bool car = cuids.Contains(kv.Key) && d > 0.01f;
+                    if ((car && !moverIsCaravan) || (car == moverIsCaravan && d > best)) { best = d; mover = kv.Key; moverIsCaravan = car; }
+                }
+                follow.details.Add(start.Count + " fleets in the game's table; clock x5 (now " + MapManager.getNowSpeed() + "); most moved " + mover + " by " + best.ToString("0.###") + (moverIsCaravan ? " (a caravan)" : ""));
+                if (mover < 0 || best < 0.01f) { follow.passed = false; follow.summary = "no fleet moved"; }
+                else
+                {
+                    var ti = snap.caravans.Find(x => x.uid == mover) ?? new CaravanInfo { uid = mover, name = "test fleet " + mover, galaxyId = snap.fleetGalaxyId, galaxyName = "" };
+                    Ui.Tracker.Track(ti, true);
+                    yield return new WaitForSecondsRealtime(1);
+                    bool allOk = true; int moved = 0; Vector2 lastMarker = Ui.Tracker.ScreenPos; float worstModel = 0;
+                    var center = new Vector2(Screen.width / 2f, Screen.height / 2f);
+                    for (int k = 0; k < 10; k++)
+                    {
+                        yield return new WaitForSecondsRealtime(0.5f);
+                        var cam = Ui.Tracker.LastCamera; var f = mgr.GetFleetByUid(mover);
+                        if (cam == null || f == null || !Ui.Tracker.Shown)
+                        {
+                            // The game may leave the galaxy view by itself while the clock runs (the player's fleet
+                            // arriving somewhere). The marker must then be hidden; the samples so far still count.
+                            string stNow = Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance?.CurState.ToString() ?? "?";
+                            bool leftView = !Ui.Tracker.InGalaxyView;
+                            if (!leftView) allOk = false;
+                            follow.details.Add("sample " + k + ": " + (leftView ? "the game left the galaxy view (state " + stNow + "); marker hidden " + !Ui.Tracker.Shown : "fleet or camera gone WRONG") + "; " + Ui.Tracker.Status);
+                            break;
+                        }
+                        Vector3 pr = cam.WorldToScreenPoint(f.transform.position);
+                        var mk = Ui.Tracker.ScreenPos;
+                        bool where;
+                        if (Ui.Tracker.OnScreen) where = Mathf.Abs(mk.x - pr.x) < 2f && Mathf.Abs(mk.y - pr.y) < 2f;
+                        else where = Vector2.Dot((pr.z > 0 ? new Vector2(pr.x, pr.y) - center : Ui.Tracker.PlaneDirection(cam, f.transform.position)).normalized, (mk - center).normalized) > 0.999f;
+                        // The ship models' screen position (what the player sees).
+                        var rs = f.GetComponentsInChildren<Renderer>(false); Vector3 sum = Vector3.zero; int rn = 0;
+                        foreach (var r in rs) if (r.enabled && r.gameObject.activeInHierarchy) { sum += r.bounds.center; rn++; }
+                        float modelGap = -1;
+                        if (rn > 0 && Ui.Tracker.OnScreen) { var mp = cam.WorldToScreenPoint(sum / rn); modelGap = new Vector2(mp.x - mk.x, mp.y - mk.y).magnitude; worstModel = Mathf.Max(worstModel, modelGap); }
+                        string lw; bool inside = Ui.Tracker.LabelInside(out lw);
+                        if (!inside) { allOk = false; follow.details.Add("sample " + k + ": name label outside the screen: " + lw + " WRONG"); }
+                        else if (k == 0) follow.details.Add("name label " + lw + " ok");
+                        if ((mk - lastMarker).magnitude > 0.5f) moved++;
+                        lastMarker = mk;
+                        allOk &= where;
+                        follow.details.Add("sample " + k + ": fleet " + f.transform.position.ToString("F3") + " -> screen " + pr.ToString("F0") + ", marker " + mk.ToString("F0") + (Ui.Tracker.OnScreen ? " on screen" : " on the edge") + ", models " + rn + (modelGap >= 0 ? " " + modelGap.ToString("0") + " px from the marker" : "") + ", objects with this uid " + Ui.Tracker.SceneObjects() + (where ? "" : " WRONG"));
+                    }
+                    yield return Shot("tracking-moving");
+                    bool fOk = allOk && moved >= 3;
+                    follow.passed = fOk;
+                    follow.summary = (fOk ? "marker followed " : "marker did NOT follow ") + ti.FullName + ": moved in " + moved + " of 10 samples, worst gap to the ship models " + worstModel.ToString("0") + " px";
+                    Ui.Tracker.Stop();
+                }
+                MapManager.setLogicSpeed(speed0);
+                if (!play0) MapManager.pauseLogic();
             }
 
             // Their source markets up to date (the mod prices normal goods only then).
@@ -1327,7 +1512,7 @@ namespace TradeHelper
                 // Hover a cut-off cell: the tip box must show its whole text.
                 Ui.TipOnHover pick = null;
                 foreach (var t in host.CanvasGo.GetComponentsInChildren<Ui.TipOnHover>(false))
-                    if (Ui.TipOnHover.CutShort(t.text)) { pick = t; break; }
+                    if (string.IsNullOrEmpty(t.explain) && Ui.TipOnHover.CutShort(t.text)) { pick = t; break; }
                 if (pick == null) c.details.Add("tooltip: no cut-off text on this page");
                 else
                 {
@@ -1341,6 +1526,41 @@ namespace TradeHelper
                     ok &= tipOk;
                     pick.OnPointerExit(ev);
                 }
+            }
+            {
+                // A column header's explanation: what the mouse hits over the "那个站" header (through the sort
+                // button) must lead to the header's tip, and the tip must show the explanation.
+                Ui.TipOnHover head = null;
+                foreach (var t in host.CanvasGo.GetComponentsInChildren<Ui.TipOnHover>(false))
+                    if (!string.IsNullOrEmpty(t.explain) && t.text != null && t.text.text.StartsWith("那个站")) { head = t; break; }
+                if (head == null) { c.details.Add("header explanation: no tip on the 那个站 header WRONG"); ok = false; }
+                else
+                {
+                    var hr = (RectTransform)head.transform; var hc = new Vector3[4]; hr.GetWorldCorners(hc);
+                    var ev = new UnityEngine.EventSystems.PointerEventData(UnityEngine.EventSystems.EventSystem.current) { position = (hc[0] + hc[2]) / 2 };
+                    var hits = new List<UnityEngine.EventSystems.RaycastResult>();
+                    UnityEngine.EventSystems.EventSystem.current.RaycastAll(ev, hits);
+                    bool reaches = false;
+                    if (hits.Count > 0) for (var x = hits[0].gameObject.transform; x != null; x = x.parent) if (x == head.transform) { reaches = true; break; }
+                    head.OnPointerEnter(ev);
+                    // Checked in the same frame: a real mouse over the test window would move the hover elsewhere.
+                    bool hOk = reaches && Ui.Tooltip.Visible && Ui.Tooltip.Text != null && Ui.Tooltip.Text.Contains("最高价是哪个空间站");
+                    yield return Shot("header-tip");
+                    c.details.Add("header explanation over 那个站: mouse reaches it " + reaches + " (hit " + (hits.Count > 0 ? hits[0].gameObject.name : "nothing") + "), shown " + Ui.Tooltip.Visible + (hOk ? " ok" : " WRONG"));
+                    ok &= hOk;
+                    head.OnPointerExit(ev);
+                }
+                int withTips = 0, headers = 0;
+                foreach (var t in host.CanvasGo.GetComponentsInChildren<Ui.TipOnHover>(true)) if (!string.IsNullOrEmpty(t.explain)) withTips++;
+                foreach (var h in host.CanvasGo.GetComponentsInChildren<Transform>(true)) if (h.name == "H") headers++;
+                c.details.Add("column headers " + headers + ", with explanations " + withTips);
+                host.Win.ToggleTerms();
+                yield return new WaitForSecondsRealtime(0.5f);
+                yield return Shot("terms");
+                bool termsOk = host.Win.TermsShown;
+                c.details.Add("terms popup shown " + termsOk + (termsOk ? " ok" : " WRONG"));
+                ok &= termsOk;
+                host.Win.ToggleTerms();
             }
             {
                 // Plans page: no plan picked -> no detail box, table takes the room.
@@ -1460,6 +1680,110 @@ namespace TradeHelper
                     ok &= done;
                     Locked(() => ET_CSAPI.utils_deletetempvar(d.buyOnce + black.NpcUid));
                 }
+                // The real dialogue, as a player does it, with a smuggler the game spawned: open its dialogue and pick
+                // "出售货舱里的可疑货物". The ledger must record the deal: what left the hold, at the fixed price, checked
+                // against the credits. First a single stack (the game pays for all of it), then a goods split in two
+                // stacks (the game takes the first stack and pays for less), with the dialogue's once-record cleared
+                // in between (test copy only).
+                if (natural != null && d.buyOnce != null)
+                {
+                    TK_NPCSetBean npcBean = Script.FreeWorldAirShip.Galaxy.NPCFleet.GalaxyNPCFleetManager.Instance?.GetFleetByUid(natural.uid)?.NpcSetBean;
+                    for (int pass = 0; pass < 2; pass++)
+                    {
+                        Locked(() =>
+                        {
+                            ET_CSAPI.utils_deletetempvar(d.buyOnce + black.NpcUid);
+                            // Empty the hold of everything on the smuggler's list first (left over from the steps above).
+                            foreach (var kv in d.buys)
+                            {
+                                var kp = kv.Key.Split('_'); int ty = int.Parse(kp[0]); string id = kp[1];
+                                for (int guard = 0; guard < 20; guard++)
+                                {
+                                    int n = 0;
+                                    foreach (var t in gd.galaxyBlock.playerFleet.getThings()) if (t != null && t.type == ty && t.id == id) n += t.getSum();
+                                    if (n == 0) break;
+                                    ET_CSAPI.player_additem(-n, ty, id, 1);
+                                }
+                            }
+                            if (pass == 0) ET_CSAPI.player_additem(3, 12, "9", 1);
+                            else { ET_CSAPI.player_additem(2, 551, "17", 1); ET_CSAPI.player_additem(1, 551, "17", 1); }
+                        });
+                        yield return null;
+                        int ledger0 = Ledger.entries.Count; long credits0 = gd.creditPoint;
+                        string why = null;
+                        GalaxyEventsDialog dlg = null;
+                        try
+                        {
+                            Script.FreeWorldAirShip.Galaxy.NPCFleet.GalaxyNPCFleetInteractionShellBootstrap.EnsureForFleet(npcBean as TK_NPCSetBean_Fleet);
+                            var opt = new GalaxyEventSelectsTipOptionGalaxyEvent();
+                            opt.setData(npcBean);
+                            if (opt.eventData?.defbean == null) why = "no dialogue for this smuggler";
+                            else { AirShipLocalData.Instance.setNpcAction(AirShipLocalData.NpcActiontype.Chat); dlg = UIHelp.showGalaxyEventsDialog(); dlg.setData(opt.eventData); }
+                        }
+                        catch (Exception e) { why = "opening the dialogue failed: " + e.Message; }
+                        if (dlg == null) { c.details.Add("smuggler dialogue: " + why + " WRONG"); ok = false; break; }
+                        // Wait for the options, then click the hold sale.
+                        UnityEngine.UI.Button pickBtn = null; string seen = "";
+                        float to = Time.realtimeSinceStartup;
+                        while (Time.realtimeSinceStartup - to < 15 && pickBtn == null)
+                        {
+                            yield return new WaitForSecondsRealtime(0.5f);
+                            var names = new List<string>();
+                            foreach (var item in dlg.GetComponentsInChildren<EventsOptionItem>(false))
+                            {
+                                var t = item.transform.Find("obj/title")?.GetComponent<TMPro.TextMeshProUGUI>();
+                                if (t == null) continue;
+                                names.Add(t.text);
+                                if (t.text.Contains("出售货舱里的可疑货物")) pickBtn = item.transform.Find("obj").GetComponent<UnityEngine.UI.Button>();
+                            }
+                            seen = string.Join(" / ", names);
+                        }
+                        yield return Shot("smuggler-dialogue-" + pass);
+                        if (pickBtn == null) { c.details.Add("smuggler dialogue: option not found (options: " + seen + ") WRONG"); ok = false; try { dlg.close(); } catch { } break; }
+                        // As the mouse does: over the option (the dialogue focuses it), then a click; the dialogue may
+                        // take a first click to focus the option, so click again when nothing happened.
+                        var pev = new UnityEngine.EventSystems.PointerEventData(UnityEngine.EventSystems.EventSystem.current);
+                        UnityEngine.EventSystems.ExecuteEvents.Execute(pickBtn.gameObject, pev, UnityEngine.EventSystems.ExecuteEvents.pointerEnterHandler);
+                        yield return new WaitForSecondsRealtime(0.3f);
+                        int clicks = 0;
+                        float tc = Time.realtimeSinceStartup;
+                        while (Time.realtimeSinceStartup - tc < 20 && gd.creditPoint == credits0)
+                        {
+                            if (clicks == 0 || (clicks < 3 && Time.realtimeSinceStartup - tc > 3f * clicks && pickBtn != null && pickBtn.gameObject.activeInHierarchy)) { pickBtn.onClick.Invoke(); clicks++; }
+                            yield return new WaitForSecondsRealtime(0.5f);
+                        }
+                        yield return new WaitForSecondsRealtime(1f);
+                        yield return Shot("smuggler-dialogue-done-" + pass);
+                        // End the talk as a player does ("结束通讯"), so the next talk starts from the first page.
+                        for (int k = 0; k < 6 && GalaxyEventsDialog.instance != null && GalaxyEventsDialog.instance.gameObject.activeInHierarchy; k++)
+                        {
+                            UnityEngine.UI.Button endBtn = null;
+                            foreach (var item in GalaxyEventsDialog.instance.GetComponentsInChildren<EventsOptionItem>(false))
+                            {
+                                var t = item.transform.Find("obj/title")?.GetComponent<TMPro.TextMeshProUGUI>();
+                                if (t != null && t.text.Contains("结束通讯")) endBtn = item.transform.Find("obj").GetComponent<UnityEngine.UI.Button>();
+                            }
+                            if (endBtn != null)
+                            {
+                                UnityEngine.EventSystems.ExecuteEvents.Execute(endBtn.gameObject, new UnityEngine.EventSystems.PointerEventData(UnityEngine.EventSystems.EventSystem.current), UnityEngine.EventSystems.ExecuteEvents.pointerEnterHandler);
+                                yield return new WaitForSecondsRealtime(0.3f);
+                                endBtn.onClick.Invoke();
+                            }
+                            yield return new WaitForSecondsRealtime(1.5f);
+                        }
+                        try { if (GalaxyEventsDialog.instance != null && GalaxyEventsDialog.instance.gameObject.activeInHierarchy) GalaxyEventsDialog.instance.close(); } catch { }
+                        yield return new WaitForSecondsRealtime(0.5f);
+                        long got = gd.creditPoint - credits0;
+                        var le = Ledger.entries.Count > ledger0 ? Ledger.entries[Ledger.entries.Count - 1] : null;
+                        string items = le == null ? "" : string.Join(", ", le.items.ConvertAll(x => (x.buy ? "bought " : "sold ") + x.key + " x" + x.qty + " " + x.net.ToString("0")));
+                        bool lOk = got > 0 && le != null && le.market != null && le.market.StartsWith("走私船") && le.creditDelta == got
+                                   && (pass == 0 ? le.exact && le.items.Count == 1 && le.items[0].key == "12_9" && le.items[0].qty == 3
+                                                 : !le.exact && le.items.Exists(x => x.key == "551_17" && x.qty == 2) && le.note.Contains("少付"));
+                        c.details.Add("smuggler dialogue pass " + (pass + 1) + " (" + clicks + " click(s); options: " + seen + "): credits " + got + "; ledger " + (le == null ? "nothing" : le.market + " " + le.creditDelta + " exact=" + le.exact + " [" + items + "] " + le.note) + (lOk ? " ok" : " WRONG"));
+                        ok &= lOk;
+                    }
+                    Locked(() => ET_CSAPI.utils_deletetempvar(d.buyOnce + black.NpcUid));
+                }
                 host.SetVisible(true); host.ShowTab(4);
                 yield return new WaitForSecondsRealtime(0.5f);
                 Ui.CaravansView.Current?.Select(ci.uid);
@@ -1468,6 +1792,138 @@ namespace TradeHelper
                 host.SetVisible(false);
                 Locked(() => cfl.caravan = original);
                 yield return Refresh();
+            }
+            {
+                // Leaving the galaxy view for the star field: the game keeps the fleets' objects there, hidden and still
+                // (GalaxyNPCFleetManager.RetainForReuse). The marker must not stand on such an object.
+                var tp = snap.caravans.Find(x => x.present);
+                if (tp != null)
+                {
+                    Ui.Tracker.Track(tp, false);
+                    yield return new WaitForSecondsRealtime(1);
+                    if (!Ui.Tracker.InGalaxyView)
+                    {
+                        c.details.Add("not in the galaxy view now (state " + (Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance?.CurState.ToString() ?? "?") + "): entering it with the tracker's locate");
+                        Ui.Tracker.Focus();
+                        float te = Time.realtimeSinceStartup;
+                        while (Time.realtimeSinceStartup - te < 60 && !(Ui.Tracker.InGalaxyView && Ui.Tracker.Shown)) yield return new WaitForSecondsRealtime(1);
+                    }
+                    bool shownInScene = Ui.Tracker.Shown;
+                    try { MainUI_Head.GoGalaxyField(null); } catch (Exception e) { c.details.Add("GoGalaxyField failed: " + e.Message); }
+                    float tf = Time.realtimeSinceStartup;
+                    while (Time.realtimeSinceStartup - tf < 40 && Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance?.CurState != Script.FreeWorldAirShip.Galaxy.GalaxyField.State.GalaxyField) yield return new WaitForSecondsRealtime(1);
+                    yield return new WaitForSecondsRealtime(3);
+                    // The map turns the fleet's dot on a moment after the star field opens.
+                    float td = Time.realtimeSinceStartup;
+                    while (Time.realtimeSinceStartup - td < 15 && !Ui.Tracker.Shown) yield return new WaitForSecondsRealtime(0.5f);
+                    var mg = Script.FreeWorldAirShip.Galaxy.NPCFleet.GalaxyNPCFleetManager.Instance;
+                    var kept = mg != null ? mg.GetFleetByUid(tp.uid) : null;
+                    bool keptHidden = kept != null && !Ui.Tracker.ShipsShown(kept);
+                    yield return Shot("star-field-after-scene");
+                    // In the star field the marker goes on the game's map dot for the fleet; the dot must sit where the
+                    // fleet's object projects (two independent sources agreeing), and the marker where the dot projects
+                    // (or on the edge towards it).
+                    var fcam = Ui.Tracker.LastCamera;
+                    bool dotOk = false; string dotInfo = "no camera";
+                    if (fcam != null && kept != null)
+                    {
+                        Vector3 dp = fcam.WorldToScreenPoint(Ui.Tracker.FleetWorld), op = fcam.WorldToScreenPoint(kept.transform.position);
+                        var mk = Ui.Tracker.ScreenPos; var cen = new Vector2(Screen.width / 2f, Screen.height / 2f);
+                        bool dotOnFleet = new Vector2(dp.x - op.x, dp.y - op.y).magnitude < 4f;
+                        bool markOk = Ui.Tracker.OnScreen ? new Vector2(mk.x - dp.x, mk.y - dp.y).magnitude < 2f : Vector2.Dot((new Vector2(dp.x, dp.y) - cen).normalized, (mk - cen).normalized) > 0.999f;
+                        string lw2; bool lin = !Ui.Tracker.OnScreen || Ui.Tracker.LabelInside(out lw2);
+                        dotOk = (Ui.Tracker.UsingMapDot || !Ui.Tracker.OnScreen) && Ui.Tracker.Shown && dotOnFleet && markOk && lin;
+                        dotInfo = Ui.Tracker.MapEntryState() + "; map dot at " + dp.ToString("F0") + ", fleet object at " + op.ToString("F0") + ", marker " + mk.ToString("F0") + (Ui.Tracker.OnScreen ? " on screen" : " on the edge");
+                    }
+                    // When the game draws no dot for the fleet (its map entry off: e.g. under the game's station panel),
+                    // the marker must be off too, with the reason at the top.
+                    bool noDot = Ui.Tracker.MapEntryState().Contains("entry active False") || Ui.Tracker.MapEntryState().Contains("dot active False");
+                    if (!dotOk && noDot && !Ui.Tracker.Shown && Ui.Tracker.Status.Contains("没有画它")) { dotOk = true; dotInfo += "; the game draws no dot for it, and the marker is off"; }
+                    bool hiddenOk = shownInScene && dotOk;
+                    c.details.Add("back to the star field: marker shown in the galaxy view " + shownInScene + ", on the map dot " + Ui.Tracker.UsingMapDot + " (" + dotInfo + "); the game still holds its object " + (kept != null) + (kept != null ? " with ships hidden " + keptHidden : "") + "; " + Ui.Tracker.Status + (hiddenOk ? " ok" : " WRONG"));
+                    ok &= hiddenOk;
+                    Ui.Tracker.Stop();
+                    // Probe (diagnostic): the star field shows dots in this galaxy after the galaxy view was open. Where
+                    // the game's kept fleet objects project now and after the clock runs, to compare with the dots in the
+                    // two screenshots.
+                    Func<string> probe = () =>
+                    {
+                        var parts = new List<string>();
+                        var cam0 = Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance?.MainCamera;
+                        foreach (var f in UnityEngine.Object.FindObjectsOfType<Script.FreeWorldAirShip.Galaxy.NPCFleet.GalaxyNPCFleet>())
+                        {
+                            if (f == null) continue;
+                            var sp = cam0 != null ? cam0.WorldToScreenPoint(f.transform.position) : Vector3.zero;
+                            var act = new List<string>();
+                            foreach (Transform ch in f.transform) if (ch.gameObject.activeInHierarchy) act.Add(ch.name);
+                            var gr = f.GetComponentsInChildren<UnityEngine.UI.Graphic>(false).Length;
+                            var rr = new List<string>();
+                            foreach (var r in f.GetComponentsInChildren<Renderer>(false)) if (r.enabled) rr.Add(r.GetType().Name + ":" + r.name);
+                            parts.Add(f.FleetUId + " at " + f.transform.position.ToString("F2") + " screen " + sp.ToString("F0") + " active children [" + string.Join(",", act) + "] renderers [" + string.Join(",", rr.GetRange(0, Math.Min(4, rr.Count))) + (rr.Count > 4 ? ",+" + (rr.Count - 4) : "") + "] ui " + gr);
+                        }
+                        return string.Join(" | ", parts);
+                    };
+                    c.details.Add("probe star field t0: " + probe());
+                    {
+                        // Which fleets the galaxy map has entries for (diagnostic).
+                        var mvs = UnityEngine.Object.FindObjectsOfType<Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyMapView>();
+                        Transform gi = null;
+                        var names = new List<string>();
+                        foreach (var mv in mvs)
+                        {
+                            var g2 = mv != null ? mv.transform.Find("DetailVisualRoot/DetailUIRoot/GalaxyInfo") : null;
+                            if (g2 == null) continue;
+                            var nn = new List<string>();
+                            foreach (Transform ch in g2) nn.Add(ch.name + (ch.gameObject.activeSelf ? "" : "(off)"));
+                            names.Add(mv.name + " active " + mv.gameObject.activeInHierarchy + " [" + string.Join(", ", nn.GetRange(0, Math.Min(20, nn.Count))) + "]");
+                            if (nn.Count > 1 && gi == null) gi = g2;
+                        }
+                        c.details.Add("map views " + mvs.Length + ": " + string.Join(" ; ", names));
+                        var cam1 = Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance?.MainCamera;
+                        var rows = new List<string>();
+                        foreach (var f in UnityEngine.Object.FindObjectsOfType<Script.FreeWorldAirShip.Galaxy.NPCFleet.GalaxyNPCFleet>())
+                        {
+                            if (f == null || cam1 == null) continue;
+                            var spp = cam1.WorldToScreenPoint(f.transform.position);
+                            string tn = "?"; try { GalaxyNPCFleetType rt; string why; if (FleetPlayerAntiDisturbService.TryResolveType(f.NpcSetBean?.getFleetBean()?.bean, out rt, out why)) tn = rt.ToString(); } catch { }
+                            rows.Add(f.FleetUId + " " + tn + " screen " + spp.ToString("F0") + " entry " + (gi != null && gi.Find(f.FleetUId.ToString()) != null));
+                        }
+                        c.details.Add("fleets vs map entries: " + string.Join(" | ", rows));
+                    }
+                    {
+                        // What draws the dots: renderers and UI graphics within 6 px of three fleets' projections.
+                        var cam0 = Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance?.MainCamera;
+                        Func<Transform, string> path = t => { var ps = new List<string>(); for (var x = t; x != null && ps.Count < 6; x = x.parent) ps.Add(x.name); ps.Reverse(); return string.Join("/", ps); };
+                        int nf = 0;
+                        foreach (var f in UnityEngine.Object.FindObjectsOfType<Script.FreeWorldAirShip.Galaxy.NPCFleet.GalaxyNPCFleet>())
+                        {
+                            if (f == null || cam0 == null || nf++ >= 3) continue;
+                            Vector3 fp = cam0.WorldToScreenPoint(f.transform.position);
+                            var near = new List<string>();
+                            foreach (var r in UnityEngine.Object.FindObjectsOfType<Renderer>())
+                            {
+                                if (!r.enabled || !r.gameObject.activeInHierarchy) continue;
+                                Vector3 rp = cam0.WorldToScreenPoint(r.bounds.center);
+                                if (rp.z > 0 && Mathf.Abs(rp.x - fp.x) < 6 && Mathf.Abs(rp.y - fp.y) < 6) near.Add(r.GetType().Name + " " + path(r.transform));
+                            }
+                            foreach (var g in UnityEngine.Object.FindObjectsOfType<UnityEngine.UI.Graphic>())
+                            {
+                                if (!g.isActiveAndEnabled || g.canvas == null) continue;
+                                var cv = g.canvas.rootCanvas; Camera uc = cv.renderMode == RenderMode.ScreenSpaceOverlay ? null : cv.worldCamera;
+                                Vector2 gp = RectTransformUtility.WorldToScreenPoint(uc, g.rectTransform.position);
+                                if (Mathf.Abs(gp.x - fp.x) < 6 && Mathf.Abs(gp.y - fp.y) < 6) near.Add("UI " + g.GetType().Name + " " + path(g.transform));
+                            }
+                            c.details.Add("probe near fleet " + f.FleetUId + " pending remove " + f.HasPendingRemove + " at screen " + fp.ToString("F0") + ": " + (near.Count == 0 ? "nothing" : string.Join(" ; ", near.GetRange(0, Math.Min(8, near.Count)))));
+                        }
+                    }
+                    float sp0 = MapManager.getLogicSpeed(); bool pl0 = MapManager.isPlay;
+                    MapManager.setLogicSpeed(5f);
+                    yield return new WaitForSecondsRealtime(4);
+                    yield return Shot("star-field-after-scene-later");
+                    c.details.Add("probe star field t+4s at x5: " + probe());
+                    MapManager.setLogicSpeed(sp0);
+                    if (!pl0) MapManager.pauseLogic();
+                }
             }
             c.passed = ok;
             c.summary = ok ? "caravans listed as in the save, prices equal the game's caravan page, checkouts match the credits and the ledger, smuggler shown and traded" : "see details";

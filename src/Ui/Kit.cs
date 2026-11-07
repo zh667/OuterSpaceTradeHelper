@@ -402,6 +402,7 @@ namespace TradeHelper.Ui
     public class TipOnHover : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
     {
         public TextMeshProUGUI text;
+        public string explain;          // always shown under the (full) text when set
 
         public static bool CutShort(TextMeshProUGUI t)
         {
@@ -411,7 +412,14 @@ namespace TradeHelper.Ui
             return !t.enableWordWrapping && t.preferredWidth > r.width + 1;
         }
 
-        public void OnPointerEnter(PointerEventData e) { if (CutShort(text)) Tooltip.Show(text.text, e.position, this); }
+        public void OnPointerEnter(PointerEventData e)
+        {
+            if (!string.IsNullOrEmpty(explain)) Tooltip.Show("<b>" + Strip(text != null ? text.text : "") + "</b>\n" + explain, e.position, this);
+            else if (CutShort(text)) Tooltip.Show(text.text, e.position, this);
+        }
+
+        // A header's text without the sort arrow.
+        static string Strip(string s) => (s ?? "").Replace(" ▼", "").Replace(" ▲", "");
         public void OnPointerExit(PointerEventData e) { Tooltip.Hide(this); }
         void OnDisable() { Tooltip.Hide(this); }
     }

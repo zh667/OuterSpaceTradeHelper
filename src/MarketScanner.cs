@@ -291,6 +291,7 @@ namespace TradeHelper
         public List<SellIdea> sells = new List<SellIdea>();
         // Caravans and suspicious caravans (smuggler fleets) the player can trade with (Caravans.Scan).
         public List<CaravanInfo> caravans = new List<CaravanInfo>();
+        public List<SmugglerSpot> smugglerSpots = new List<SmugglerSpot>();
         public long scanMs;
         public int marketsDone, marketsTotal, marketsReused;
         public bool complete, adviceReused;

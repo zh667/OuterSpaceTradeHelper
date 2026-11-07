@@ -108,6 +108,7 @@ namespace TradeHelper.Ui
             title = Kit.TxtAt(win, "跑商助手  <size=15><color=#A4A5A6>" + TradeHelperBehaviour.Version + "  ·  " + cfg.hotkey + " 开关  ·  拖动标题栏移动</color></size>", Pad + 16, 10, 900, 34, 24, Theme.Text);
             Kit.Button(win, "刷新", W - Pad - 46 - 12 - 110, 12, 110, 32, () => host.RequestRefresh(true), true);
             Kit.Button(win, "截图反馈", W - Pad - 46 - 12 - 110 - 8 - 110, 12, 110, 32, () => host.Screenshot());
+            Kit.Button(win, "名词说明", W - Pad - 46 - 12 - 110 - 8 - 110 - 8 - 110, 12, 110, 32, ToggleTerms);
             var close = Kit.Place(Kit.New("Close", win), W - Pad - 40, 10, 38, 38);
             var cimg = Kit.Img(close, Theme.Close ?? Theme.White, Theme.Close != null ? Color.white : Theme.Bad, true);
             var cb = close.gameObject.AddComponent<Button>();
@@ -129,6 +130,37 @@ namespace TradeHelper.Ui
             Kit.Drop.CloseAll = () => { foreach (var v in views.Values) (v as ViewBase)?.CloseDrops(); };
             if (cfg.panelResizable) AddResizeHandles();
             SelectTab(0);
+        }
+
+        RectTransform terms;
+        public bool TermsShown => terms != null && terms.gameObject.activeSelf;
+
+        // The terms popup: what the panel's words mean (Glossary.Terms), scrollable, over the body.
+        public void ToggleTerms()
+        {
+            if (terms != null) { terms.gameObject.SetActive(!terms.gameObject.activeSelf); return; }
+            float w = Mathf.Min(900, BodyW - 40), h = BodyH - 20;
+            terms = Kit.Place(Kit.New("Terms", popupLayer), W - Pad - w, BodyY, w, h);
+            Kit.Img(terms, Theme.Box ?? Theme.White, Theme.Hex(0x1C1B19, 0.98f), true);
+            Kit.TxtAt(terms, "名词说明  <size=14><color=#A4A5A6>表头上停一下鼠标，也会弹出那一列的说明</color></size>", 16, 8, w - 80, 34, 20, Theme.Text);
+            Kit.Button(terms, "关闭", w - 76, 8, 64, 30, () => terms.gameObject.SetActive(false));
+            var view = Kit.Place(Kit.New("View", terms), 16, 48, w - 32, h - 60);
+            Kit.Img(view, Theme.White, new Color(0, 0, 0, 0), true);
+            view.gameObject.AddComponent<RectMask2D>();
+            var content = Kit.New("Content", view);
+            content.anchorMin = new Vector2(0, 1); content.anchorMax = new Vector2(1, 1); content.pivot = new Vector2(0, 1);
+            var sb = new System.Text.StringBuilder();
+            foreach (var t in Glossary.Terms) sb.Append("<b><color=#F4B30D>").Append(t[0]).Append("</color></b>\n").Append(t[1]).Append("\n\n");
+            var txt = Kit.Txt(content, sb.ToString(), 16, Theme.Text, TextAlignmentOptions.TopLeft);
+            txt.enableWordWrapping = true;
+            txt.overflowMode = TextOverflowModes.Overflow;
+            float th = txt.GetPreferredValues(sb.ToString(), w - 40, 0).y + 20;
+            txt.rectTransform.anchorMin = new Vector2(0, 1); txt.rectTransform.anchorMax = new Vector2(1, 1); txt.rectTransform.pivot = new Vector2(0, 1);
+            txt.rectTransform.offsetMin = new Vector2(0, -th); txt.rectTransform.offsetMax = new Vector2(-8, 0);
+            content.sizeDelta = new Vector2(0, th);
+            var sr = view.gameObject.AddComponent<ScrollRect>();
+            sr.horizontal = false; sr.viewport = view; sr.content = content;
+            sr.movementType = ScrollRect.MovementType.Clamped; sr.scrollSensitivity = 45; sr.inertia = false;
         }
 
         // The canvas size in its own units (CanvasScaler: 1920x1080 reference, width/height matched half each).
