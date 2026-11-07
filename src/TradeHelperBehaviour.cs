@@ -8,7 +8,7 @@ namespace TradeHelper
 {
     public class TradeHelperBehaviour : MonoBehaviour
     {
-        public const string Version = "0.6.0";
+        public const string Version = "0.7.0";
         public static TradeHelperBehaviour Instance;
 
         Config cfg;
@@ -31,6 +31,7 @@ namespace TradeHelper
             Ledger.Load();
             Ledger.marketName = uid => latest?.markets.Find(m => m.uid == uid)?.name;
             Ledger.goodsName = key => latest != null ? MarketScanner.ItemName(latest, key) : null;
+            Ledger.galaxyName = id => latest != null ? latest.GalaxyName(id) : id;
             Ledger.caravanGalaxy = cf => { var g = cf.pos?.galaxyId; return latest != null ? latest.GalaxyName(g) : g; };
             nextExport = Time.unscaledTime + 60f;
             settlement.MarketFinished += _ => refreshAfterSettlement = true;
