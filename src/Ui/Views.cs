@@ -560,7 +560,8 @@ namespace TradeHelper.Ui
         }
 
         readonly Table<Station> table;
-        readonly TextMeshProUGUI info;
+        readonly TextMeshProUGUI info, warn;
+        string warnFor;
         readonly Kit.Btn pauseBtn, initAll, catchAll;
         int show;
         float nextBind;
@@ -571,6 +572,9 @@ namespace TradeHelper.Ui
             var s = table.all.Find(x => x.uid == uid);
             return s != null && !s.Initialized;
         }
+
+        string KeepWhen() => cfg.keepFreshHour < 0 ? "跨日之后马上" : "每天游戏时间 " + cfg.keepFreshHour + ":00";
+        string KeepWhenAtBuild;
 
         string State(Station s)
         {
@@ -590,24 +594,33 @@ namespace TradeHelper.Ui
 
         public SettlementView(Window w, RectTransform body, Config cfg, TradeHelperBehaviour host) : base(w, body, cfg, host)
         {
-            Kit.TxtAt(root, "补算 = 让游戏把这个站欠着的天数算完；初始化 = 第一次生成从没开过的站的货架。效果和你打开那个站的交易所一样，会改变它的库存和价格。随时可以取消，已经算过的天数不会退回。", 0, 0, w.BodyW, 24, 14, Theme.Text2);
+            Kit.TxtAt(root, "补算 = 让游戏把这个站欠着的天数算完；初始化 = 第一次生成从没开过的站的货架。效果和你打开那个站的交易所一样，会改变它的库存和价格。随时可以取消，已经算过的天数不会退回。模组不会自己补算，都由你决定。", 0, 0, w.BodyW, 24, 14, Theme.Text2);
+            KeepWhenAtBuild = KeepWhen(); warnFor = KeepWhenAtBuild;
+            warn = Kit.TxtAt(root, "<color=#F4B30D>会卡顿：</color>一键初始化、一次补很多站或很多天时，游戏会连续卡一阵（每站每天约 10MB 的结算垃圾，攒够就整体回收一次，第一次最明显）；“保持实时”的站每天跨日后各欠 1 天，到" + KeepWhen() + "会一起补，勾得越多那时越卡。补算时间可在“设置”里改。（鼠标停这里看详情）", 0, 24, w.BodyW, 24, 14, Theme.Text2);
+            warn.raycastTarget = true;
+            var wt = warn.gameObject.AddComponent<TipOnHover>(); wt.text = warn;
+            wt.explain = "卡顿从哪来：补算/初始化交给游戏自己的后台线程，但游戏结算一个站一天会产生约 10MB 临时数据，攒到一定量就触发一次整体垃圾回收，那一帧会停几百毫秒。所以：\n" +
+                "· 一键初始化已发现的站：第一次要生成很多站的货架，会连续卡一阵；之后就不用了。\n" +
+                "· 补算所有欠天的站：欠得越多卡得越久，可以随时“暂停”或“全部取消”。\n" +
+                "· 保持实时：游戏每天跨日后，每个保持实时的站都欠 1 天，模组在设定的时间把它们一起交给游戏补算；勾 20 个站，就是那时补 20 站·天，会有几次明显停顿。\n" +
+                "· 这一页默认什么都不勾。跑商计划默认勾“两站实时”：计划进行时它的买入站、卖出站保持实时，计划完成或删除后自动取消它加的站；你自己在这一页勾过或改过的站，计划结束时不动。建议只勾你常跑的几个站，并在“设置”里把补算时间放在你方便的时候。";
             const float BW = 230, Gap = 8;
-            initAll = Kit.Button(root, "", 0, 30, BW, 32, () =>
+            initAll = Kit.Button(root, "", 0, 52, BW, 32, () =>
             {
                 if (cancelInit) host.settlement.Cancel(uid => IsUninitialized(uid));
                 else foreach (var s in table.all) if (!s.Initialized && s.discovered) host.settlement.Enqueue(s.uid);
                 nextBind = 0;
             });
-            catchAll = Kit.Button(root, "", BW + Gap, 30, BW, 32, () =>
+            catchAll = Kit.Button(root, "", BW + Gap, 52, BW, 32, () =>
             {
                 if (cancelCatch) host.settlement.Cancel(uid => !IsUninitialized(uid));
                 else foreach (var s in table.all) if (s.Initialized && s.Pending > 0) host.settlement.Enqueue(s.uid);
                 nextBind = 0;
             });
-            pauseBtn = Kit.Button(root, "暂停", (BW + Gap) * 2, 30, BW, 32, () => { host.settlement.paused = !host.settlement.paused; nextBind = 0; });
-            Kit.Button(root, "全部取消", (BW + Gap) * 3, 30, BW, 32, () => { host.settlement.CancelAll(); nextBind = 0; });
-            Drop("显示：", (BW + Gap) * 4, 30, BW, new List<string> { "全部", "未开过", "欠天", "实时", "保持实时的", "未发现星系" }, 0, i => { show = i; table.Resort(); });
-            info = Kit.TxtAt(root, "", 0, 68, w.BodyW, 26, 15, Theme.Text);
+            pauseBtn = Kit.Button(root, "暂停", (BW + Gap) * 2, 52, BW, 32, () => { host.settlement.paused = !host.settlement.paused; nextBind = 0; });
+            Kit.Button(root, "全部取消", (BW + Gap) * 3, 52, BW, 32, () => { host.settlement.CancelAll(); nextBind = 0; });
+            Drop("显示：", (BW + Gap) * 4, 52, BW, new List<string> { "全部", "未开过", "欠天", "实时", "保持实时的", "未发现星系" }, 0, i => { show = i; table.Resort(); });
+            info = Kit.TxtAt(root, "", 0, 90, w.BodyW, 26, 15, Theme.Text);
             var cols = new List<Column<Station>>
             {
                 new Column<Station> { title = "站", width = 330, text = s => s.name, key = s => s.name },
@@ -617,10 +630,10 @@ namespace TradeHelper.Ui
                     buttonEnabled = s => host.settlement.IsQueued(s.uid) || !s.Initialized || s.Pending > 0,
                     onButton = s => { if (host.settlement.IsQueued(s.uid)) host.settlement.Cancel(id => id == s.uid); else host.settlement.Enqueue(s.uid); } },
                 new Column<Station> { title = "保持实时", width = 120, checkGet = s => cfg.keepFresh.Contains(s.uid),
-                    checkSet = (s, v) => { if (v) { if (!cfg.keepFresh.Contains(s.uid)) cfg.keepFresh.Add(s.uid); host.settlement.Enqueue(s.uid); } else cfg.keepFresh.Remove(s.uid); cfg.Save(); } },
+                    checkSet = (s, v) => { Plans.ClaimKeepFresh(s.uid); if (v) { if (!cfg.keepFresh.Contains(s.uid)) cfg.keepFresh.Add(s.uid); host.settlement.Enqueue(s.uid); } else cfg.keepFresh.Remove(s.uid); cfg.Save(); } },
             };
             Glossary.Apply(cols, "catchup");
-            table = new Table<Station>(root, 0, 100, w.BodyW, w.BodyH - 100, cols, cfg.settleSort, cfg.settleDesc);
+            table = new Table<Station>(root, 0, 122, w.BodyW, w.BodyH - 122, cols, cfg.settleSort, cfg.settleDesc);
             table.sortChanged = (c, d) => { cfg.settleSort = c; cfg.settleDesc = d; cfg.Save(); };
             table.filter = s => show == 0 || (show == 1 && !s.Initialized) || (show == 2 && s.Initialized && s.Pending > 0) || (show == 3 && s.Initialized && s.Pending == 0) || (show == 4 && cfg.keepFresh.Contains(s.uid)) || (show == 5 && !s.discovered);
         }
@@ -637,6 +650,7 @@ namespace TradeHelper.Ui
         {
             if (Time.unscaledTime < nextBind) return;
             nextBind = Time.unscaledTime + 0.5f;
+            if (warnFor != KeepWhen()) { warn.text = warn.text.Replace("到" + (warnFor ?? KeepWhenAtBuild) + "会一起补", "到" + KeepWhen() + "会一起补"); warnFor = KeepWhen(); }
             var st = host.settlement;
             int un = 0, owe = 0, qInit = 0, qCatch = 0;
             foreach (var s in table.all)
@@ -687,6 +701,12 @@ namespace TradeHelper.Ui
             Kit.TxtAt(root, "鼠标移到面板边缘或角上会亮起，按住拖动；松开后按新大小重排。", 740, y, Mathf.Max(200, w.BodyW - 740), 30, 14, Theme.Text2);
             y += 42;
             Kit.TxtAt(root, "后台补算：和你打开空间站交易所一样，交给游戏自己的后台线程算，一次一个站，不占游戏主画面的帧。", 0, y, 900, 30, 15, Theme.Text2);
+            y += 42;
+            var hours = new List<string> { "跨日之后马上（默认）" };
+            for (int h = 0; h < 24; h += 3) hours.Add("每天游戏时间 " + h + ":00");
+            int hi = cfg.keepFreshHour < 0 ? 0 : 1 + cfg.keepFreshHour / 3;
+            Drop("“保持实时”的站什么时候补算：", 0, y, 520, hours, Mathf.Clamp(hi, 0, hours.Count - 1), i => { cfg.keepFreshHour = i == 0 ? -1 : (i - 1) * 3; cfg.Save(); });
+            Kit.TxtAt(root, "游戏每天跨日后，每个保持实时的站欠 1 天；在这个时间一起交给游戏补算，那会儿可能停顿几次，勾的站越多越明显。手动点的补算和初始化不受这个时间限制。", 530, y, Mathf.Max(200, w.BodyW - 530), 30, 14, Theme.Text2);
             y += 42;
             int ri = Array.IndexOf(RefreshOpts, cfg.autoRefreshSeconds);
             Drop("面板打开时自动刷新：", 0, y, 420, new List<string> { "每 15 秒", "每 30 秒", "每 60 秒", "每 2 分钟", "不自动刷新" }, ri < 0 ? 1 : ri,
