@@ -10,7 +10,7 @@ namespace TradeHelper
     // breakdown of every scan. Written as plain text to <data folder>/perf.log every 30 real seconds.
     public static class Perf
     {
-        public enum Cat { Scan, Settle, Ui, Gui, Plans, Count }
+        public enum Cat { Scan, Settle, Ui, Gui, Plans, Ledger, Count }
         static readonly long[] frameTicks = new long[(int)Cat.Count];
         static readonly double[] sumMs = new double[(int)Cat.Count];
         static readonly double[] maxMs = new double[(int)Cat.Count];
@@ -88,7 +88,7 @@ namespace TradeHelper
             double modAvg = 0;
             for (int i = 0; i < (int)Cat.Count; i++) modAvg += sumMs[i] / frames;
             sb.Append(modAvg.ToString("0.00")).Append("ms 最多 ").Append(modFrameMaxMs.ToString("0.0")).Append("ms");
-            string[] names = { "扫描", "补算", "面板", "热键", "计划" };
+            string[] names = { "扫描", "补算", "面板", "热键", "计划", "结账记录" };
             for (int i = 0; i < (int)Cat.Count; i++)
                 sb.Append(" | ").Append(names[i]).Append(" 平均 ").Append((sumMs[i] / frames).ToString("0.00")).Append(" 最多 ").Append(maxMs[i].ToString("0.0"));
             sb.Append(" | 补算 ").Append(settledDays).Append(" 天 共 ").Append(settleMsTotal.ToString("0")).Append("ms");

@@ -8,7 +8,7 @@ namespace TradeHelper
 {
     public class TradeHelperBehaviour : MonoBehaviour
     {
-        public const string Version = "0.4.5";
+        public const string Version = "0.7.0";
         public static TradeHelperBehaviour Instance;
 
         Config cfg;
@@ -28,10 +28,18 @@ namespace TradeHelper
             Instance = this;
             cfg = Config.Load();
             Plans.Load();
+            Ledger.Load();
+            Ledger.marketName = uid => latest?.markets.Find(m => m.uid == uid)?.name;
+            Ledger.goodsName = key => latest != null ? MarketScanner.ItemName(latest, key) : null;
+            Ledger.galaxyName = id => latest != null ? latest.GalaxyName(id) : id;
+            Ledger.caravanGalaxy = cf => { var g = cf.pos?.galaxyId; return latest != null ? latest.GalaxyName(g) : g; };
             nextExport = Time.unscaledTime + 60f;
             settlement.MarketFinished += _ => refreshAfterSettlement = true;
             if (SelfTest.Requested()) gameObject.AddComponent<SelfTest>();
         }
+
+        public GameObject CanvasGo => window != null ? window.canvasGo : null;
+        public Ui.Window Win => window;
 
         public void SetVisible(bool on)
         {
@@ -201,6 +209,7 @@ namespace TradeHelper
         void Update()
         {
             var alloc = Perf.AllocBegin();
+            try { Ui.Tracker.Tick(); } catch (Exception e) { Debug.LogWarning("[TradeHelper] tracker: " + e.Message); Ui.Tracker.Stop(); }
             try
             {
                 var gd = MarketScanner.Game;
@@ -226,6 +235,10 @@ namespace TradeHelper
                 if (refreshAfterSettlement && settlement.Pending == 0 && Visible) { refreshAfterSettlement = false; RequestRefresh(false); }
                 // Read the markets in the background right after a save loads, so the first F8 already has data.
                 if (latest == null && job == null && themeAt == 0) RequestRefresh(false);
+                // The player's checkouts (see Ledger): the counter and credits every frame, the cart while the trade page is open.
+                long tl = Perf.Now;
+                Ledger.Watch(gd);
+                Perf.Add(Perf.Cat.Ledger, tl);
                 // Everything that touches game objects runs under the game's locks (see GameLock), tried, never awaited.
                 Snapshot finished = null;
                 if (GameLock.TryEnter(gd))
@@ -251,6 +264,7 @@ namespace TradeHelper
                     if (cfg.autoRefreshSeconds > 0 && Time.unscaledTime >= nextAutoRefresh) RequestRefresh(false);
                     window.Tick();
                     UpdateStatus();
+                    Ui.InputProbe.Tick(CanvasGo);
                     Perf.Add(Perf.Cat.Ui, tu);
                 }
                 if (cfg.exportEverySeconds > 0 && Time.unscaledTime >= nextExport)
@@ -286,7 +300,13 @@ namespace TradeHelper
         void OnGUI()
         {
             long t = Perf.Now;
-            try { HotkeyCheck(); } finally { Perf.Add(Perf.Cat.Gui, t); }
+            try
+            {
+                HotkeyCheck();
+                if (Visible) Ui.InputProbe.OnGui(CanvasGo);
+            }
+            catch (Exception e) { Debug.LogWarning("[TradeHelper] gui: " + e.Message); }
+            finally { Perf.Add(Perf.Cat.Gui, t); }
         }
 
         void HotkeyCheck()

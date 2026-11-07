@@ -85,6 +85,18 @@ namespace TradeHelper.Ui
             return t;
         }
 
+        // A text that may be cut short ("…"): when the pointer is over it and it does not fit, the full text shows in a
+        // box next to the pointer (Tooltip). The text takes pointer hover only; clicks and scrolling still reach what is
+        // under it (events bubble to the parents).
+        public static TextMeshProUGUI Tip(TextMeshProUGUI t)
+        {
+            if (t == null) return t;
+            t.raycastTarget = true;
+            var h = t.GetComponent<TipOnHover>() ?? t.gameObject.AddComponent<TipOnHover>();
+            h.text = t;
+            return t;
+        }
+
         static ColorBlock Tint(Color normal, Color hover, Color pressed)
         {
             var cb = ColorBlock.defaultColorBlock;
@@ -234,6 +246,7 @@ namespace TradeHelper.Ui
             input.caretColor = Theme.Accent;
             input.customCaretColor = true;
             input.selectionColor = new Color(Theme.Accent.r, Theme.Accent.g, Theme.Accent.b, 0.35f);
+            InputProbe.Watch(input, placeholder);
             if (changed != null) input.onValueChanged.AddListener(s => { try { changed(s); } catch (Exception e) { Debug.LogWarning("[TradeHelper] input: " + e); } });
             return input;
         }
@@ -349,6 +362,31 @@ namespace TradeHelper.Ui
         }
     }
 
+    // One of the panel's resize zones (edges = which sides it moves). See Window.AddResizeHandles.
+    public class ResizeHandle : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler, IBeginDragHandler, IDragHandler, IEndDragHandler
+    {
+        public const int Left = 1, Right = 2, Bottom = 4, Top = 8;
+        public static readonly Color Idle = new Color(0, 0, 0, 0);
+        public int edges;
+        public Window window;
+        bool dragging;
+        Image img;
+
+        Image Img => img != null ? img : (img = GetComponent<Image>());
+        static Color Hover => new Color(Theme.Accent.r, Theme.Accent.g, Theme.Accent.b, 0.55f);
+
+        public void OnPointerEnter(PointerEventData e) { if (Img != null) Img.color = Hover; }
+        public void OnPointerExit(PointerEventData e) { if (Img != null && !dragging) Img.color = Idle; }
+        public void OnBeginDrag(PointerEventData e) { dragging = true; window?.BeginResize(e.position); }
+        public void OnDrag(PointerEventData e) { window?.DragResize(edges, e.position); }
+        public void OnEndDrag(PointerEventData e)
+        {
+            dragging = false;
+            if (Img != null) Img.color = Idle;
+            window?.EndResize();
+        }
+    }
+
     public class DragHandle : MonoBehaviour, IDragHandler
     {
         public RectTransform target;
@@ -358,6 +396,78 @@ namespace TradeHelper.Ui
             if (target == null) return;
             float s = canvas != null ? canvas.scaleFactor : 1f;
             target.anchoredPosition += e.delta / Mathf.Max(0.01f, s);
+        }
+    }
+
+    public class TipOnHover : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
+    {
+        public TextMeshProUGUI text;
+        public string explain;          // always shown under the (full) text when set
+
+        public static bool CutShort(TextMeshProUGUI t)
+        {
+            if (t == null || string.IsNullOrEmpty(t.text)) return false;
+            if (t.isTextTruncated) return true;
+            var r = t.rectTransform.rect;
+            return !t.enableWordWrapping && t.preferredWidth > r.width + 1;
+        }
+
+        public void OnPointerEnter(PointerEventData e)
+        {
+            if (!string.IsNullOrEmpty(explain)) Tooltip.Show("<b>" + Strip(text != null ? text.text : "") + "</b>\n" + explain, e.position, this);
+            else if (CutShort(text)) Tooltip.Show(text.text, e.position, this);
+        }
+
+        // A header's text without the sort arrow.
+        static string Strip(string s) => (s ?? "").Replace(" ▼", "").Replace(" ▲", "");
+        public void OnPointerExit(PointerEventData e) { Tooltip.Hide(this); }
+        void OnDisable() { Tooltip.Hide(this); }
+    }
+
+    // One floating box on the panel's popup layer.
+    public static class Tooltip
+    {
+        public static RectTransform layer;
+        static RectTransform box;
+        static TextMeshProUGUI label;
+        static object owner;
+        public static bool Visible => box != null && box.gameObject.activeInHierarchy;
+        public static string Text => label != null ? label.text : null;
+        const float MaxW = 640, Pad = 10;
+
+        public static void Show(string s, Vector2 screen, object who)
+        {
+            if (layer == null) return;
+            if (box == null || box.parent != layer)
+            {
+                box = Kit.New("Tooltip", layer);
+                Kit.Img(box, Theme.Box ?? Theme.White, Theme.Hex(0x1C1B19, 0.97f));
+                label = Kit.Txt(box, "", 15, Theme.Text, TextAlignmentOptions.TopLeft);
+                label.enableWordWrapping = true;
+                label.overflowMode = TextOverflowModes.Overflow;
+                Kit.Stretch(label.rectTransform, Pad, Pad, Pad, Pad);
+            }
+            owner = who;
+            label.text = s;
+            float w = Mathf.Min(MaxW, label.GetPreferredValues(s, MaxW - 2 * Pad, 0).x + 2 * Pad + 2);
+            float h = label.GetPreferredValues(s, w - 2 * Pad, 0).y + 2 * Pad + 2;
+            Vector2 local;
+            RectTransformUtility.ScreenPointToLocalPointInRectangle(layer, screen, null, out local);
+            var lr = layer.rect;
+            // Layer pivot is its top-left corner: x grows right, y grows up (so negative downwards).
+            float x = local.x + 18, y = local.y - 22;
+            if (x + w > lr.width) x = Mathf.Max(0, local.x - w - 8);
+            if (-y + h > lr.height) y = -Mathf.Max(0, lr.height - h);
+            Kit.Place(box, x, -y, w, h);
+            box.SetAsLastSibling();
+            box.gameObject.SetActive(true);
+        }
+
+        public static void Hide(object who = null)
+        {
+            if (box == null || (who != null && who != owner)) return;
+            box.gameObject.SetActive(false);
+            owner = null;
         }
     }
 }

@@ -49,8 +49,14 @@ namespace TradeHelper.Ui
         readonly Dictionary<int, IView> views = new Dictionary<int, IView>();
         int tab;
         public Snapshot snap;
-        static readonly string[] TabNames = { "跑商建议", "跑商计划", "卖库存", "各站市场", "我的库存", "后台补算", "设置" };
-        public const float W = 1560, H = 860, BodyY = 112, Pad = 18;
+        static readonly string[] TabNames = { "跑商建议", "跑商计划", "卖库存", "各站市场", "商队", "我的库存", "后台补算", "结账记录", "设置" };
+        public const float BodyY = 112, Pad = 18, DefaultW = 1560, DefaultH = 860, MinW = 1360, MinH = 700;
+        // Size of the panel, from the config, kept between MinW/MinH and the screen.
+        public float W = DefaultW, H = DefaultH;
+        Canvas canvas;
+        RectTransform rootRt;
+        bool rebuildPending;
+        Vector2? rebuildPos;
         public float BodyW => W - Pad * 2;
         public float BodyH => H - BodyY - Pad;
 
@@ -71,7 +77,7 @@ namespace TradeHelper.Ui
             Theme.Load();
             canvasGo = new GameObject("TradeHelperCanvas");
             UnityEngine.Object.DontDestroyOnLoad(canvasGo);
-            var canvas = canvasGo.AddComponent<Canvas>();
+            canvas = canvasGo.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
             canvas.sortingOrder = 30000;
             var scaler = canvasGo.AddComponent<CanvasScaler>();
@@ -80,7 +86,10 @@ namespace TradeHelper.Ui
             scaler.matchWidthOrHeight = 0.5f;
             canvasGo.AddComponent<GraphicRaycaster>();
 
-            var rootRt = (RectTransform)canvasGo.transform;
+            rootRt = (RectTransform)canvasGo.transform;
+            var max = MaxSize();
+            W = Mathf.Clamp(cfg.panelW, MinW, Mathf.Max(MinW, max.x));
+            H = Mathf.Clamp(cfg.panelH, MinH, Mathf.Max(MinH, max.y));
             win = Kit.New("Window", rootRt);
             win.anchorMin = win.anchorMax = new Vector2(0.5f, 0.5f);
             win.pivot = new Vector2(0.5f, 0.5f);
@@ -99,6 +108,7 @@ namespace TradeHelper.Ui
             title = Kit.TxtAt(win, "跑商助手  <size=15><color=#A4A5A6>" + TradeHelperBehaviour.Version + "  ·  " + cfg.hotkey + " 开关  ·  拖动标题栏移动</color></size>", Pad + 16, 10, 900, 34, 24, Theme.Text);
             Kit.Button(win, "刷新", W - Pad - 46 - 12 - 110, 12, 110, 32, () => host.RequestRefresh(true), true);
             Kit.Button(win, "截图反馈", W - Pad - 46 - 12 - 110 - 8 - 110, 12, 110, 32, () => host.Screenshot());
+            Kit.Button(win, "名词说明", W - Pad - 46 - 12 - 110 - 8 - 110 - 8 - 110, 12, 110, 32, ToggleTerms);
             var close = Kit.Place(Kit.New("Close", win), W - Pad - 40, 10, 38, 38);
             var cimg = Kit.Img(close, Theme.Close ?? Theme.White, Theme.Close != null ? Color.white : Theme.Bad, true);
             var cb = close.gameObject.AddComponent<Button>();
@@ -116,8 +126,167 @@ namespace TradeHelper.Ui
 
             body = Kit.Place(Kit.New("Body", win), Pad, BodyY, BodyW, BodyH);
             popupLayer = Kit.Stretch(Kit.New("PopupLayer", win));
+            Tooltip.layer = popupLayer;
             Kit.Drop.CloseAll = () => { foreach (var v in views.Values) (v as ViewBase)?.CloseDrops(); };
+            if (cfg.panelResizable) AddResizeHandles();
             SelectTab(0);
+        }
+
+        RectTransform terms;
+        public bool TermsShown => terms != null && terms.gameObject.activeSelf;
+
+        // The terms popup: what the panel's words mean (Glossary.Terms), scrollable, over the body.
+        public void ToggleTerms()
+        {
+            if (terms != null) { terms.gameObject.SetActive(!terms.gameObject.activeSelf); return; }
+            float w = Mathf.Min(900, BodyW - 40), h = BodyH - 20;
+            terms = Kit.Place(Kit.New("Terms", popupLayer), W - Pad - w, BodyY, w, h);
+            Kit.Img(terms, Theme.Box ?? Theme.White, Theme.Hex(0x1C1B19, 0.98f), true);
+            Kit.TxtAt(terms, "名词说明  <size=14><color=#A4A5A6>表头上停一下鼠标，也会弹出那一列的说明</color></size>", 16, 8, w - 80, 34, 20, Theme.Text);
+            Kit.Button(terms, "关闭", w - 76, 8, 64, 30, () => terms.gameObject.SetActive(false));
+            var view = Kit.Place(Kit.New("View", terms), 16, 48, w - 32, h - 60);
+            Kit.Img(view, Theme.White, new Color(0, 0, 0, 0), true);
+            view.gameObject.AddComponent<RectMask2D>();
+            var content = Kit.New("Content", view);
+            content.anchorMin = new Vector2(0, 1); content.anchorMax = new Vector2(1, 1); content.pivot = new Vector2(0, 1);
+            var sb = new System.Text.StringBuilder();
+            foreach (var t in Glossary.Terms) sb.Append("<b><color=#F4B30D>").Append(t[0]).Append("</color></b>\n").Append(t[1]).Append("\n\n");
+            var txt = Kit.Txt(content, sb.ToString(), 16, Theme.Text, TextAlignmentOptions.TopLeft);
+            txt.enableWordWrapping = true;
+            txt.overflowMode = TextOverflowModes.Overflow;
+            float th = txt.GetPreferredValues(sb.ToString(), w - 40, 0).y + 20;
+            txt.rectTransform.anchorMin = new Vector2(0, 1); txt.rectTransform.anchorMax = new Vector2(1, 1); txt.rectTransform.pivot = new Vector2(0, 1);
+            txt.rectTransform.offsetMin = new Vector2(0, -th); txt.rectTransform.offsetMax = new Vector2(-8, 0);
+            content.sizeDelta = new Vector2(0, th);
+            var sr = view.gameObject.AddComponent<ScrollRect>();
+            sr.horizontal = false; sr.viewport = view; sr.content = content;
+            sr.movementType = ScrollRect.MovementType.Clamped; sr.scrollSensitivity = 45; sr.inertia = false;
+        }
+
+        // The canvas size in its own units (CanvasScaler: 1920x1080 reference, width/height matched half each).
+        public static Vector2 CanvasSize()
+        {
+            float sw = Mathf.Max(1, Screen.width), sh = Mathf.Max(1, Screen.height);
+            float logScale = (Mathf.Log(sw / 1920f, 2) + Mathf.Log(sh / 1080f, 2)) / 2f;
+            float scale = Mathf.Pow(2, logScale);
+            return new Vector2(sw / scale, sh / scale);
+        }
+
+        public static Vector2 MaxSize() { var c = CanvasSize(); return new Vector2(c.x - 16, c.y - 16); }
+
+        // Drag zones on the four edges (one side) and four corners (two sides). Highlighted under the mouse; while
+        // dragging an outline shows the new size; on release the panel is built again at that size.
+        void AddResizeHandles()
+        {
+            const float E = 8, C = 20;
+            Handle(Kit.Place(Kit.New("ResizeL", win), 0, C, E, H - 2 * C), ResizeHandle.Left);
+            Handle(Kit.Place(Kit.New("ResizeR", win), W - E, C, E, H - 2 * C), ResizeHandle.Right);
+            Handle(Kit.Place(Kit.New("ResizeT", win), C, 0, W - 2 * C, E), ResizeHandle.Top);
+            Handle(Kit.Place(Kit.New("ResizeB", win), C, H - E, W - 2 * C, E), ResizeHandle.Bottom);
+            Handle(Kit.Place(Kit.New("ResizeTL", win), 0, 0, C, C), ResizeHandle.Top | ResizeHandle.Left);
+            Handle(Kit.Place(Kit.New("ResizeTR", win), W - C, 0, C, C), ResizeHandle.Top | ResizeHandle.Right);
+            Handle(Kit.Place(Kit.New("ResizeBL", win), 0, H - C, C, C), ResizeHandle.Bottom | ResizeHandle.Left);
+            Handle(Kit.Place(Kit.New("ResizeBR", win), W - C, H - C, C, C), ResizeHandle.Bottom | ResizeHandle.Right);
+        }
+
+        void Handle(RectTransform rt, int edges)
+        {
+            Kit.Img(rt, Theme.White, ResizeHandle.Idle, true);
+            var h = rt.gameObject.AddComponent<ResizeHandle>();
+            h.edges = edges; h.window = this;
+        }
+
+        Rect startRect, newRect;
+        Vector2 startMouse;
+        RectTransform ghost;
+
+        public void BeginResize(Vector2 screenPos)
+        {
+            var p = win.anchoredPosition;
+            startRect = newRect = new Rect(p.x - W / 2, p.y - H / 2, W, H);
+            startMouse = screenPos;
+            ghost = Kit.New("ResizeOutline", rootRt);
+            ghost.anchorMin = ghost.anchorMax = ghost.pivot = new Vector2(0.5f, 0.5f);
+            Kit.Img(Kit.Stretch(Kit.New("Fill", ghost)), Theme.White, new Color(Theme.Accent.r, Theme.Accent.g, Theme.Accent.b, 0.08f));
+            foreach (var side in new[] { "L", "R", "T", "B" })
+            {
+                var e = Kit.New(side, ghost);
+                e.anchorMin = side == "R" ? new Vector2(1, 0) : side == "T" ? new Vector2(0, 1) : Vector2.zero;
+                e.anchorMax = side == "L" ? new Vector2(0, 1) : side == "B" ? new Vector2(1, 0) : Vector2.one;
+                e.pivot = new Vector2(0.5f, 0.5f);
+                e.offsetMin = new Vector2(side == "R" ? -2 : 0, side == "T" ? -2 : 0);
+                e.offsetMax = new Vector2(side == "L" ? 2 : 0, side == "B" ? 2 : 0);
+                Kit.Img(e, Theme.White, Theme.Accent);
+            }
+            UpdateGhost();
+        }
+
+        public void DragResize(int edges, Vector2 screenPos)
+        {
+            float s = canvas != null ? Mathf.Max(0.01f, canvas.scaleFactor) : 1f;
+            var d = (screenPos - startMouse) / s;
+            var max = MaxSize();
+            float l = startRect.xMin, r = startRect.xMax, b = startRect.yMin, t = startRect.yMax;
+            if ((edges & ResizeHandle.Left) != 0) l = Mathf.Clamp(l + d.x, r - max.x, r - MinW);
+            if ((edges & ResizeHandle.Right) != 0) r = Mathf.Clamp(r + d.x, l + MinW, l + max.x);
+            if ((edges & ResizeHandle.Bottom) != 0) b = Mathf.Clamp(b + d.y, t - max.y, t - MinH);
+            if ((edges & ResizeHandle.Top) != 0) t = Mathf.Clamp(t + d.y, b + MinH, b + max.y);
+            newRect = Rect.MinMaxRect(l, b, r, t);
+            UpdateGhost();
+        }
+
+        void UpdateGhost()
+        {
+            if (ghost == null) return;
+            ghost.anchoredPosition = newRect.center;
+            ghost.sizeDelta = newRect.size;
+            ghost.SetAsLastSibling();
+        }
+
+        public void EndResize()
+        {
+            if (ghost != null) UnityEngine.Object.Destroy(ghost.gameObject);
+            ghost = null;
+            if (Mathf.Abs(newRect.width - W) < 1 && Mathf.Abs(newRect.height - H) < 1) return;
+            cfg.panelW = Mathf.Round(newRect.width); cfg.panelH = Mathf.Round(newRect.height);
+            cfg.Save();
+            rebuildPos = newRect.center;
+            rebuildPending = true;
+        }
+
+        // A new size from the settings page or the edges: built again on the next frame (not inside the click).
+        public void ApplySize(float w, float h)
+        {
+            cfg.panelW = w; cfg.panelH = h; cfg.Save();
+            rebuildPending = true;
+        }
+
+        public void RequestRebuild() { rebuildPending = true; }
+
+        void Rebuild()
+        {
+            rebuildPending = false;
+            var pos = rebuildPos ?? (win != null ? win.anchoredPosition : Vector2.zero);
+            rebuildPos = null;
+            int t = tab;
+            var s = snap;
+            bool vis = Visible;
+            foreach (var v in views.Values) (v as ViewBase)?.CloseDrops();
+            views.Clear();
+            tabButtons.Clear();
+            if (canvasGo != null) UnityEngine.Object.Destroy(canvasGo);
+            snap = null;
+            Build();
+            // Keep the panel on screen.
+            var c = CanvasSize();
+            pos.x = Mathf.Clamp(pos.x, -(c.x - W) / 2, (c.x - W) / 2);
+            pos.y = Mathf.Clamp(pos.y, -(c.y - H) / 2, (c.y - H) / 2);
+            win.anchoredPosition = pos;
+            snap = s;
+            SelectTab(t);
+            if (s != null) foreach (var v in views.Values) v.OnSnapshot(s);
+            canvasGo.SetActive(vis);
+            Debug.Log("[TradeHelper] panel size " + W + "x" + H);
         }
 
         public RectTransform PopupLayer => popupLayer;
@@ -136,9 +305,11 @@ namespace TradeHelper.Ui
                     case 1: v = new PlansView(this, body, cfg, host); break;
                     case 2: v = new SellsView(this, body, cfg, host); break;
                     case 3: v = new MarketsView(this, body, cfg, host); break;
-                    case 4: v = new InventoryView(this, body, cfg, host); break;
-                    case 5: v = new SettlementView(this, body, cfg, host); break;
-                    case 6: v = new SettingsView(this, body, cfg, host); break;
+                    case 4: v = new CaravansView(this, body, cfg, host); break;
+                    case 5: v = new InventoryView(this, body, cfg, host); break;
+                    case 6: v = new SettlementView(this, body, cfg, host); break;
+                    case 7: v = new LedgerView(this, body, cfg, host); break;
+                    case 8: v = new SettingsView(this, body, cfg, host); break;
                 }
                 views[t] = v;
                 if (snap != null) v.OnSnapshot(snap);
@@ -162,6 +333,7 @@ namespace TradeHelper.Ui
 
         public void Tick()
         {
+            if (rebuildPending) { Rebuild(); return; }
             IView v;
             if (views.TryGetValue(tab, out v)) v.Tick();
         }

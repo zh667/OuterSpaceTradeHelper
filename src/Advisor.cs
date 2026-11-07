@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace TradeHelper
 {
@@ -50,7 +51,7 @@ namespace TradeHelper
             foreach (var m in snap.markets)
                 foreach (var q in m.goods)
                 {
-                    if (!Usable(q, cfg) || q.type == 550) continue; // ships: price depends on defects
+                    if (!Usable(q, cfg)) continue;
                     List<GoodsQuote> l;
                     if (!byGid.TryGetValue(q.gid, out l)) byGid[q.gid] = l = new List<GoodsQuote>();
                     l.Add(q);
@@ -98,7 +99,68 @@ namespace TradeHelper
             }
             ideas.Sort((a, b) => b.Profit.CompareTo(a.Profit));
             snap.trades = ideas;
+            CategoryNotes(snap, byGid, ideas);
             Budget.tTrades += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+        }
+
+        // All categories with goods in the usable markets; for those without a paying route, the pair of markets with the
+        // best margin on the first unit (sell price after tax minus buy price with tax), from the scan's cached first-unit
+        // prices: a pass over each goods' quotes, no game calls.
+        static void CategoryNotes(Snapshot snap, Dictionary<string, List<GoodsQuote>> byGid, List<TradeIdea> ideas)
+        {
+            var paying = new HashSet<string>(ideas.Select(t => t.category));
+            var cats = new SortedSet<string>(StringComparer.Ordinal);
+            var best = new Dictionary<string, KeyValuePair<double, GoodsQuote[]>>();
+            var sellers = new Dictionary<string, int>();
+            foreach (var l in byGid.Values)
+            {
+                if (l.Count == 0) continue;
+                string cat = string.IsNullOrEmpty(l[0].category) ? "其他" : l[0].category;
+                cats.Add(cat);
+                if (paying.Contains(cat)) continue;
+                GoodsQuote b1 = null, b2 = null, s1 = null, s2 = null;
+                foreach (var q in l)
+                {
+                    if (q.buyable && q.stock > 0)
+                    {
+                        if (b1 == null || q.buy1 < b1.buy1) { b2 = b1; b1 = q; }
+                        else if (b2 == null || q.buy1 < b2.buy1) b2 = q;
+                    }
+                    if (s1 == null || q.sell1 > s1.sell1) { s2 = s1; s1 = q; }
+                    else if (s2 == null || q.sell1 > s2.sell1) s2 = q;
+                }
+                if (b1 != null) { int v; sellers.TryGetValue(cat, out v); sellers[cat] = v + 1; }
+                GoodsQuote bb = null, bs = null;
+                if (b1 != null && s1 != null && b1.market != s1.market) { bb = b1; bs = s1; }
+                else
+                {
+                    double m1 = b1 != null && s2 != null ? s2.sell1 - b1.buy1 : double.NegativeInfinity;
+                    double m2 = b2 != null && s1 != null ? s1.sell1 - b2.buy1 : double.NegativeInfinity;
+                    if (m1 >= m2 && b1 != null && s2 != null) { bb = b1; bs = s2; }
+                    else if (b2 != null && s1 != null) { bb = b2; bs = s1; }
+                }
+                if (bb == null) continue;
+                double m = bs.sell1 - bb.buy1;
+                KeyValuePair<double, GoodsQuote[]> cur;
+                if (!best.TryGetValue(cat, out cur) || m > cur.Key) best[cat] = new KeyValuePair<double, GoodsQuote[]>(m, new[] { bb, bs });
+            }
+            snap.tradeCategories = new List<string>(cats);
+            snap.categoryNote.Clear();
+            foreach (var cat in cats)
+            {
+                if (paying.Contains(cat)) continue;
+                KeyValuePair<double, GoodsQuote[]> b;
+                if (!best.TryGetValue(cat, out b))
+                {
+                    int n; sellers.TryGetValue(cat, out n);
+                    snap.categoryNote[cat] = "“" + cat + "”现在没法倒卖：" + (n == 0 ? "能用的站里没有在卖的。" : "只有一个站在卖。");
+                    continue;
+                }
+                var bq = b.Value[0]; var sq = b.Value[1];
+                string unit = bq.ship ? "艘" : "个";
+                snap.categoryNote[cat] = "“" + cat + "”扣两边税后没有赚钱的路线。差价最好的：" + bq.name + "，" + bq.market.name + " 买 " + Ui.Fmt.Money(bq.buy1)
+                    + " → " + sq.market.name + " 卖 " + Ui.Fmt.Money(sq.sell1) + "，" + (b.Key > 0 ? "第一" + unit + "能赚 " + Ui.Fmt.Money(b.Key) + "，但这些数量已被你的跑商计划占用" : "每" + unit + "亏 " + Ui.Fmt.Money(-b.Key)) + "。";
+            }
         }
 
         // The marginal profit of the i-th unit (sell price after tax minus buy price with tax) never increases with
@@ -144,6 +206,7 @@ namespace TradeHelper
             {
                 if (Budget.Over) { Budget.tSells += System.Diagnostics.Stopwatch.GetTimestamp() - t0; yield return null; t0 = System.Diagnostics.Stopwatch.GetTimestamp(); }
                 string gid;
+                if (kv.Key.StartsWith("550_")) continue;   // the player's own warships are not stock to sell off
                 if (!snap.itemKeyToGid.TryGetValue(kv.Key, out gid)) continue;
                 SellIdea best = null;
                 foreach (var m in snap.markets)
