@@ -110,7 +110,7 @@ def prepare_data(save):
     print("test data:", TEST_DATA, "save:", save)
 
 
-def install_mod(no_build):
+def install_mod(no_build, only_this_mod=False):
     if not no_build:
         r = subprocess.run([sys.executable, str(ROOT / "tools" / "build.py")], capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
@@ -123,7 +123,7 @@ def install_mod(no_build):
     mods.mkdir()
     # The player's other installed mods (code and manifest; their data stays with the player): a save that used them
     # loads without the game's "missing mod" question, which would stop the test.
-    for other in (GAME / "mods").iterdir() if (GAME / "mods").exists() else []:
+    for other in (GAME / "mods").iterdir() if (GAME / "mods").exists() and not only_this_mod else []:
         if other.is_dir() and other.name != "TradeHelper":
             for part in ("Manifest", "v_common"):
                 if (other / part).exists():
@@ -140,6 +140,7 @@ def main():
     ap.add_argument("--limit", type=int, default=900, help="seconds; use about 1800 with --tests settle")
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--refresh-runtime", action="store_true")
+    ap.add_argument("--only-this-mod", action="store_true", help="leave the player's other mods out of the test copy")
     a = ap.parse_args()
 
     # One test copy at a time (the original game, started from Steam, is not counted).
@@ -155,7 +156,7 @@ def main():
         a.save = newest_save(a.save)
     (RUNTIME / "steam_appid.txt").write_text(APP_ID, encoding="ascii")
     prepare_data(a.save)
-    install_mod(a.no_build)
+    install_mod(a.no_build, a.only_this_mod)
 
     res = RUNTIME / "selftest-result.json"
     if res.exists():

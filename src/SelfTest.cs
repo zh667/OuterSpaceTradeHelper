@@ -101,8 +101,56 @@ namespace TradeHelper
                 }
             }
             catch (Exception e) { Log("mod list check: " + e.Message); }
-            UserBean.getInstance().loadArchive(info);
-            while (MarketScanner.Game == null && Time.realtimeSinceStartup - tl < 300) yield return new WaitForSecondsRealtime(1);
+            // As UserBean.loadArchive(ArchiveInfo) does (read the file on a worker thread, then enter on the main thread),
+            // but with the save's mod list trimmed to the mods in this test copy: the game reads that list from the file,
+            // so a copy without the player's other mods would stop at the "missing mod" question.
+            Archive loaded = null; Exception loadErr = null; bool fileRead = false;
+            var th = new System.Threading.Thread(() => { try { var a0 = new Archive(info, null); a0.loadFile(); loaded = a0; } catch (Exception e) { loadErr = e; } fileRead = true; });
+            th.Start();
+            while (!fileRead && Time.realtimeSinceStartup - tl < 300) yield return new WaitForSecondsRealtime(0.5f);
+            if (loaded == null) { Finish("could not read the save: " + (loadErr?.Message ?? "timeout")); yield break; }
+            try
+            {
+                // The mods in this test copy, by the packageId in their manifests (ModPluginManager is not accessible).
+                var installedIds = new HashSet<string>();
+                foreach (var dir in Directory.GetDirectories(Path.Combine(Path.GetDirectoryName(Application.dataPath), "mods")))
+                {
+                    var mf = Path.Combine(dir, "Manifest", "manifest.xml");
+                    if (!File.Exists(mf)) continue;
+                    var mm = System.Text.RegularExpressions.Regex.Match(File.ReadAllText(mf), "<packageId>\\s*([^<\\s]+)\\s*</packageId>");
+                    if (mm.Success) installedIds.Add(mm.Groups[1].Value);
+                }
+                int n0 = loaded.info.containsMods?.Count ?? 0;
+                loaded.info.containsMods?.RemoveAll(m => m == null || !installedIds.Contains(m.Split('_')[0]));
+                if ((loaded.info.containsMods?.Count ?? 0) != n0) Log("save used " + (n0 - loaded.info.containsMods.Count) + " mod(s) not in this test copy; entering without them");
+            }
+            catch (Exception e) { Log("mod list trim: " + e.Message); }
+            UserBean.getInstance().loadArchive(loaded);
+            bool answered = false;
+            while (MarketScanner.Game == null && Time.realtimeSinceStartup - tl < 300)
+            {
+                yield return new WaitForSecondsRealtime(1);
+                if (answered) continue;
+                // A test copy without the player's other mods: the game asks whether to load a save that used them.
+                // Answer "继续" as the player would (only in the test copy).
+                try
+                {
+                    foreach (var t in UnityEngine.Object.FindObjectsOfType<TMPro.TextMeshProUGUI>())
+                    {
+                        if (t == null || !t.isActiveAndEnabled || t.text == null || !t.text.Contains("丢失的MOD信息")) continue;
+                        var box = t.transform;
+                        for (int up = 0; up < 6 && box.parent != null; up++) box = box.parent;
+                        foreach (var b2 in box.GetComponentsInChildren<UnityEngine.UI.Button>(false))
+                        {
+                            var bt = b2.GetComponentInChildren<TMPro.TextMeshProUGUI>();
+                            // Once: each click starts loading the save again.
+                            if (bt != null && bt.text.Contains("继续")) { Log("the game asked about missing mods; answered 继续"); answered = true; b2.onClick.Invoke(); break; }
+                        }
+                        break;
+                    }
+                }
+                catch (Exception e) { Log("missing-mods dialog: " + e.Message); }
+            }
             if (MarketScanner.Game == null) { yield return Shot("load-timeout"); Finish("the save did not load in 300 s"); yield break; }
             result.perf["loadSeconds"] = Math.Round(Time.realtimeSinceStartup - tl, 1);
 
@@ -116,6 +164,19 @@ namespace TradeHelper
             if (req.tests == "stress")
             {
                 yield return Guard(Stress(), "stress");
+                Finish(null);
+                yield break;
+            }
+            if (req.tests == "perf")
+            {
+                yield return Guard(PerfRun(), "performance run (measurement)");
+                Finish(null);
+                yield break;
+            }
+            if (req.tests == "keepfresh-time")
+            {
+                yield return Guard(PlanKeepFreshOwnership(), "plans release only the stations they added");
+                yield return Guard(DayCrossAndKeepHour(), "day change and the keep-fresh hour (measurement)");
                 Finish(null);
                 yield break;
             }
@@ -1108,6 +1169,124 @@ namespace TradeHelper
             ok &= bad == 0;
             s = string.Join("; ", sb);
             return ok;
+        }
+
+        // Normal play for the performance log: the clock at x3 (as the player plays) with the panel closed, then open on
+        // the caravans page, then in the galaxy view tracking a caravan; each phase long enough for several perf.log lines.
+        // The log lines of the run are copied into the result.
+        IEnumerator PerfRun()
+        {
+            var c = new Check { name = "performance run (measurement)", info = true, passed = true };
+            result.checks.Add(c);
+            var cfg = host.Cfg;
+            string log = Path.Combine(cfg.DataDir, "perf.log");
+            long start = File.Exists(log) ? new FileInfo(log).Length : 0;
+            Action<string> phase = name => { Perf.Write("---- " + name, cfg); c.details.Add(DateTime.Now.ToString("HH:mm:ss") + " " + name); };
+            MapManager.setLogicSpeed(3f);
+            phase("面板关着，时钟 x3（母舰画面）");
+            yield return new WaitForSecondsRealtime(150);
+            try { MainUI_Head.GoGalaxyFleet(); } catch { }
+            yield return new WaitForSecondsRealtime(10);
+            phase("面板关着，时钟 x3（星系画面）");
+            yield return new WaitForSecondsRealtime(150);
+            host.SetVisible(true); host.ShowTab(4);
+            phase("面板开着（商队页，自动刷新），时钟 x3");
+            yield return new WaitForSecondsRealtime(150);
+            var tc = host.Latest?.caravans.Find(x => x.present);
+            host.SetVisible(false);
+            if (tc != null) Ui.Tracker.Track(tc, true);
+            phase("面板关着，追踪 " + (tc != null ? tc.FullName : "（没有在场的商队）") + "，时钟 x3");
+            yield return new WaitForSecondsRealtime(150);
+            Ui.Tracker.Stop();
+            host.SetVisible(true); host.ShowTab(0);
+            phase("面板开着（跑商建议页），时钟 x3");
+            yield return new WaitForSecondsRealtime(150);
+            host.SetVisible(false);
+            MapManager.setLogicSpeed(1f); MapManager.pauseLogic();
+            yield return new WaitForSecondsRealtime(35);
+            try
+            {
+                using (var fs = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    fs.Seek(start, SeekOrigin.Begin);
+                    var text = new StreamReader(fs, System.Text.Encoding.UTF8).ReadToEnd();
+                    foreach (var line in text.Split('\n')) if (line.Trim().Length > 0) c.details.Add(line.Trim());
+                }
+            }
+            catch (Exception e) { c.details.Add("perf.log: " + e.Message); }
+            c.summary = "perf.log lines " + (c.details.Count) + " (see details)";
+        }
+
+        // "Two stations up to date" on plans: a plan adds only stations the player does not keep up to date himself, and
+        // releases only those when it is done or removed; a station the player ticked or unticked on the catch-up page
+        // after the plan added it is his and stays.
+        IEnumerator PlanKeepFreshOwnership()
+        {
+            var c = new Check { name = "plans release only the stations they added" };
+            result.checks.Add(c);
+            yield return Refresh();
+            var snap = host.Latest; var cfg = host.Cfg;
+            var saved = new List<long>(cfg.keepFresh);
+            var ms = snap.markets.FindAll(m => !m.planet && m.initialized && m.goods.Count > 0);
+            if (ms.Count < 4) { c.passed = false; c.summary = "fewer than 4 markets"; yield break; }
+            long A = ms[0].uid, B = ms[1].uid, C = ms[2].uid, D = ms[3].uid;
+            cfg.keepFresh.Clear(); cfg.keepFresh.Add(A);            // the player keeps A himself
+            Func<GoodsQuote, GoodsQuote, TradeIdea> idea = (qb, qs) => new TradeIdea { gid = qb.gid, name = qb.name, category = qb.category, buy = qb, sell = qs, qty = 1, cost = 1, revenue = 2 };
+            GoodsQuote a0 = ms[0].goods[0], b0 = ms[1].goods.Find(q => q.gid == a0.gid) ?? ms[1].goods[0];
+            GoodsQuote c0 = ms[2].goods[0], d0 = ms[3].goods.Find(q => q.gid == c0.gid) ?? ms[3].goods[0];
+            var p1 = Plans.FromTrade(idea(a0, b0), snap, cfg, host.settlement);   // A (player's) -> B (added by the plan)
+            var p2 = Plans.FromTrade(idea(c0, d0), snap, cfg, host.settlement);   // C, D added by the plan
+            string after = "after adding: kept " + string.Join(",", cfg.keepFresh.ConvertAll(u => u == A ? "A" : u == B ? "B" : u == C ? "C" : u == D ? "D" : "?")) + "; plan 1 added " + p1.addedKeepFresh.Count + ", plan 2 added " + p2.addedKeepFresh.Count;
+            bool addOk = p1.keepFresh && p1.addedKeepFresh.Count == 1 && p1.addedKeepFresh[0] == B && p2.addedKeepFresh.Count == 2 && cfg.keepFresh.Contains(A) && cfg.keepFresh.Contains(B) && cfg.keepFresh.Contains(C) && cfg.keepFresh.Contains(D);
+            Plans.ClaimKeepFresh(D);                                               // the player ticks D on the catch-up page
+            Plans.MarkDone(p1, cfg); Plans.MarkDone(p2, cfg);
+            string done = "after both are done: kept " + string.Join(",", cfg.keepFresh.ConvertAll(u => u == A ? "A" : u == B ? "B" : u == C ? "C" : u == D ? "D" : "?"));
+            bool doneOk = cfg.keepFresh.Contains(A) && !cfg.keepFresh.Contains(B) && !cfg.keepFresh.Contains(C) && cfg.keepFresh.Contains(D);
+            c.details.Add(after + (addOk ? " ok" : " WRONG"));
+            c.details.Add(done + " (expected A and D: A was the player's, D he ticked after the plan added it)" + (doneOk ? " ok" : " WRONG"));
+            Plans.Remove(p1, cfg); Plans.Remove(p2, cfg);
+            host.settlement.CancelAll();
+            cfg.keepFresh.Clear(); cfg.keepFresh.AddRange(saved); cfg.Save();
+            c.passed = addOk && doneOk;
+            c.summary = c.passed ? "a plan keeps its two stations up to date and releases only the ones it added" : "see details";
+        }
+
+        // When markets start to owe a day (game time of day), and that a keep-fresh hour holds the catch-up until then.
+        IEnumerator DayCrossAndKeepHour()
+        {
+            var c = new Check { name = "day change and the keep-fresh hour (measurement)", info = true, passed = true };
+            result.checks.Add(c);
+            var gd = MarketScanner.Game; var cfg = host.Cfg;
+            int savedHour = cfg.keepFreshHour; var saved = new List<long>(cfg.keepFresh);
+            yield return Refresh();
+            // A station no earlier step touched (the plan test above queued and then cancelled the first four).
+            var cand = host.Latest.markets.FindAll(m => !m.planet && m.initialized && m.goods.Count > 0);
+            var m0 = cand.Count > 6 ? cand.GetRange(6, cand.Count - 6).Find(m => m.pendingDays == 0 && !host.settlement.IsCancelled(m.uid)) : null;
+            if (m0 == null) { c.summary = "no up-to-date market"; yield break; }
+            Func<string> clock = () => { long t = gd.elapsedMM % Settlement.DayMM; return (t / 60000) + ":" + ((t % 60000) / 1000).ToString("00") + " (day " + gd.elapsedMM / Settlement.DayMM + ", force day " + gd.ForceTime_Day + ")"; };
+            // The hour: two game hours after the coming midnight, so the catch-up must wait for it.
+            cfg.keepFresh.Clear(); cfg.keepFresh.Add(m0.uid); cfg.keepFreshHour = 2; cfg.Save();
+            c.details.Add("start " + clock() + "; keeping " + m0.name + " up to date, catch-up hour 2:00");
+            int owedAt = -1; string owedClock = null, queuedClock = null; long owedMM = -1;
+            MapManager.setLogicSpeed(20f);
+            float t0 = Time.realtimeSinceStartup;
+            yield return Shot("clock-start");
+            while (Time.realtimeSinceStartup - t0 < 600)
+            {
+                yield return null;
+                int pend = 0; try { pend = m0.ex.pendingSettlementDays != null ? m0.ex.pendingSettlementDays.Count : 0; } catch { }
+                if (owedClock == null && pend > 0) { owedClock = clock(); owedMM = gd.elapsedMM; owedAt = pend; yield return Shot("clock-owed"); }
+                if (owedClock != null && queuedClock == null && (host.settlement.IsQueued(m0.uid) || host.settlement.currentUid == m0.uid || Settlement.inFlightUid == m0.uid)) queuedClock = clock();
+                if (queuedClock != null) break;
+            }
+            MapManager.setLogicSpeed(1f); MapManager.pauseLogic();
+            c.details.Add("the market started to owe a day at " + (owedClock ?? "never (in 600 s)") + "; the keep-fresh catch-up was queued at " + (queuedClock ?? "never"));
+            bool held = owedClock != null && queuedClock != null && Settlement.GameHour(gd) >= 2;
+            c.details.Add("catch-up waited for the chosen hour: " + held);
+            cfg.keepFreshHour = savedHour; cfg.keepFresh.Clear(); cfg.keepFresh.AddRange(saved); cfg.Save();
+            host.settlement.CancelAll();
+            c.summary = "owed at " + (owedClock ?? "-") + ", caught up at " + (queuedClock ?? "-");
+            c.passed = held;
         }
 
         // Measurement for the player's questions: how much the fleet carries, where transports go, and how long a
