@@ -38,6 +38,7 @@ namespace TradeHelper
         public float tax;
         public bool priced;              // prices could be computed (source market up to date)
         public bool present;             // in the game's scene with its goods (else only where it is and when it leaves)
+        public bool kept;                // not in the scene, but its goods from the last time it was are known
         public bool smuggler;            // traded through the smuggler dialogue's fixed deals, not a trade window
         public double smugglerSaleTotal; public int smugglerSaleKinds, smugglerListSize; public bool smugglerSold;
         public List<CaravanLine> lines = new List<CaravanLine>();
@@ -148,7 +149,10 @@ namespace TradeHelper
         static CaravanInfo Read(FWGameData gd, Snapshot snap, FWFactionFleet f, FWCaravanFleet cf, FWCaravan car, int type, long now, long playerUid,
             Dictionary<string, int> observe, Dictionary<long, MarketInfo> byUid)
         {
-            var c = new CaravanInfo { uid = f.uid, black = car != null ? car.isBlackMarket : type == (int)GalaxyNPCFleetType.Smuggler, cash = car != null ? car.cp : -1, present = car != null };
+            // In the scene (f.fleet set) the caravan can be traded; a caravan kept from an earlier visit (only
+            // materializedState) still has its goods, but the game trades only with fleets in the scene (it needs the
+            // fleet's NPC: FWCaravan.getFleetDiscount -> getFleetCaravan()).
+            var c = new CaravanInfo { uid = f.uid, black = car != null ? car.isBlackMarket : type == (int)GalaxyNPCFleetType.Smuggler, cash = car != null ? car.cp : -1, present = car != null && f.fleet != null, kept = car != null && f.fleet == null };
             c.fleetName = f.Name;
             c.name = cf != null && !string.IsNullOrEmpty(cf.name) ? cf.name : (f.Name ?? "商队");
             c.kind = c.black ? "可疑商队" : "商队";
@@ -160,6 +164,8 @@ namespace TradeHelper
             if (f.activityDisappearTime > 0) c.leftMM = Math.Max(0, f.activityDisappearTime - now);
             if (f.activityAppearTime > now) c.status = "还没出现（约 " + Math.Max(1, (f.activityAppearTime - now) / GameHourMM) + " 小时后）";
             else c.status = f.journey != null ? "跨星系航行中（位置会变）" : "在这个星系里";
+            if (c.kept)
+                c.priceNote = "它现在不在场景里（打开它所在星系的星系地图才会出场），下面是上次出场时的货和价格，出场后可能已经变了；不在场景里时不能交易";
             if (car == null)
             {
                 c.relation = "—";
@@ -519,6 +525,18 @@ namespace TradeHelper
                 else line.note = Join(line.note, "空间站都不收");
                 c.lines.Add(line);
                 all += line.total; kinds++;
+            }
+            // The rest of its list (not in the fleet's hold), so the player sees what it would take and for how much.
+            foreach (var kv in d.buys)
+            {
+                if (c.lines.Exists(l => !l.sells && l.key == kv.Key)) continue;
+                var line = NewLine(snap, kv.Key, false, 0, src);
+                line.unit = kv.Value * d.rate;
+                line.note = sold ? "这支船已经收过一次，不会再收" : "舰队货舱里没有（要放在舰队货舱里才收；数量不限，每支船只收一次）";
+                GoodsQuote q;
+                if (line.gid != null && bestSell.TryGetValue(line.gid, out q)) { line.bestName = q.market.name; line.best = q.sell1; }
+                else line.note = Join(line.note, "空间站都不收");
+                c.lines.Add(line);
             }
             c.smugglerSaleTotal = all; c.smugglerSaleKinds = kinds; c.smugglerSold = sold; c.smugglerListSize = d.buys.Count;
             if (car == null) c.priceNote = "还没出场（打开它所在星系的星系地图它才会出现）；对话里的买卖价格是固定的，这里先列出来";

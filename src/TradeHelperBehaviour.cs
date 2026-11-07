@@ -208,6 +208,7 @@ namespace TradeHelper
         void Update()
         {
             var alloc = Perf.AllocBegin();
+            try { Ui.Tracker.Tick(); } catch (Exception e) { Debug.LogWarning("[TradeHelper] tracker: " + e.Message); Ui.Tracker.Stop(); }
             try
             {
                 var gd = MarketScanner.Game;

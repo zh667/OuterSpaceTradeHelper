@@ -1047,17 +1047,21 @@ namespace TradeHelper
                 string g = null;
                 Locked(() =>
                 {
+                    try {
                     var parts = new List<string>();
                     if (buy != null) { var t = FindThing(FindCaravanFleet(gd, ci.uid).getCaravan().allGoods, buy.key); parts.Add("buy mod " + buy.unit.ToString("0.000000") + " game " + (t == null ? "?" : cc.GetSellUnitPrice(t).ToString("0.000000"))); }
                     if (sell != null) { var t = FindThing(gd.galaxyBlock.playerFleet.getThings().ConvertAll(x => (FWBaseBean)x), sell.key); parts.Add("sell mod " + sell.unit.ToString("0.000000") + " game " + (t == null ? "?" : cc.GetPurchaseUnitPrice(t).ToString("0.000000"))); }
                     parts.Add("factor buy " + cc.GetPriceFactor(true).ToString("0.0000000000") + " mod " + ci.FactorBuy.ToString("0.0000000000") + ", sell " + cc.GetPriceFactor(false).ToString("0.0000000000") + " mod " + ci.FactorSell.ToString("0.0000000000"));
                     factorsSame = cc.GetPriceFactor(true) == ci.FactorBuy && cc.GetPriceFactor(false) == ci.FactorSell;
                     g = string.Join("; ", parts);
+                    } catch (Exception ex) { g = "game price failed: " + ex.Message; }
                 });
                 c.details.Add("exact: " + g + (factorsSame ? " (factors identical)" : " FACTORS DIFFER"));
             }
             int n0 = Ledger.entries.Count; long cp0 = gd.creditPoint;
-            Locked(() => DoCheckout.Invoke(page, null));
+            string coErr = null;
+            Locked(() => { try { DoCheckout.Invoke(page, null); } catch (Exception ex) { coErr = (ex.InnerException ?? ex).Message; } });
+            if (coErr != null) c.details.Add("checkout failed: " + coErr);
             yield return null; yield return null;
             var e = Ledger.entries.Count > n0 ? Ledger.entries[Ledger.entries.Count - 1] : null;
             long d = gd.creditPoint - cp0;
@@ -1178,6 +1182,35 @@ namespace TradeHelper
                 }
             });
             if (!snap.caravans.Exists(x => x.present)) { c.passed = false; c.summary = "no caravan came into the scene"; yield break; }
+            {
+                // Track one: the marker must find its scene object, and after the camera move it must sit near the
+                // screen centre.
+                var tc = snap.caravans.Find(x => x.present);
+                host.SetVisible(false);
+                Ui.Tracker.Track(tc, true);
+                yield return new WaitForSecondsRealtime(4f);
+                var center = new Vector2(Screen.width / 2f, Screen.height / 2f);
+                float dist = (Ui.Tracker.ScreenPos - center).magnitude / Mathf.Max(1, Screen.height);
+                yield return Shot("tracking");
+                var tcam = Ui.Tracker.LastCamera;
+                string camInfo = tcam == null ? "no camera" : "camera " + tcam.name + " enabled " + tcam.isActiveAndEnabled + " at " + tcam.transform.position + " fwd " + tcam.transform.forward + " ortho " + tcam.orthographic + "; fleet at " + Ui.Tracker.FleetWorld + " -> screen " + tcam.WorldToScreenPoint(Ui.Tracker.FleetWorld) + " of " + Screen.width + "x" + Screen.height
+                    + "; scene state " + (Script.FreeWorldAirShip.Galaxy.GalaxyField.GalaxyFieldScene.Instance?.CurState.ToString() ?? "?");
+                c.details.Add("tracking camera: " + camInfo);
+                // The marker must be where the game's projection puts the fleet, or on the edge towards it.
+                var pr = Ui.Tracker.Projected; var sp2 = Ui.Tracker.ScreenPos;
+                bool where;
+                if (Ui.Tracker.OnScreen) where = Mathf.Abs(sp2.x - pr.x) < 1f && Mathf.Abs(sp2.y - pr.y) < 1f;
+                else
+                {
+                    var cdir = new Vector2(pr.x, pr.y) - center; var mdir = sp2 - center;
+                    bool onEdge = sp2.x <= 49 || sp2.x >= Screen.width - 49 || sp2.y <= 49 || sp2.y >= Screen.height - 49;
+                    where = onEdge && Vector2.Dot(cdir.normalized, mdir.normalized) > 0.999f;
+                }
+                bool trackOk = Ui.Tracker.Found && Ui.Tracker.InGalaxyView && where;
+                c.details.Add("tracking " + tc.FullName + ": galaxy view " + Ui.Tracker.InGalaxyView + ", found " + Ui.Tracker.Found + ", on screen " + Ui.Tracker.OnScreen + ", marker " + Ui.Tracker.ScreenPos + " for projection " + Ui.Tracker.Projected + " (" + (Ui.Tracker.OnScreen ? "on screen" : "edge, towards it") + "); " + Ui.Tracker.Status + (trackOk ? " ok" : " WRONG"));
+                ok &= trackOk;
+                Ui.Tracker.Stop();
+            }
 
             // Their source markets up to date (the mod prices normal goods only then).
             var need = new List<long>();

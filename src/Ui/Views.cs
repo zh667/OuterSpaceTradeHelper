@@ -281,16 +281,20 @@ namespace TradeHelper.Ui
 
         public CaravansView(Window w, RectTransform body, Config cfg, TradeHelperBehaviour host) : base(w, body, cfg, host)
         {
-            const float LW = 520;
+            const float LW = 590;
             Current = this;
-            Kit.TxtAt(root, "商队（点击查看）", 0, 0, LW, 30, 17, Theme.Text);
+            Kit.TxtAt(root, "商队（点击查看）", 0, 0, LW - 300, 30, 17, Theme.Text);
+            Kit.Button(root, "定位追踪的商队", LW - 290, 0, 150, 30, () => { if (!Tracker.Focus()) FairyUIDispatcher.showToast(Tracker.uid < 0 ? "还没有追踪商队：点列表里的“追踪”" : "它不在场景里：你的舰队要在它所在的星系，它才会出现"); });
+            Kit.Button(root, "停止追踪", LW - 132, 0, 132, 30, () => { Tracker.Stop(); list.Bind(); });
             var ccols = new List<Column<CaravanInfo>>
             {
                 new Column<CaravanInfo> { title = "商队", width = 170, text = c => (c.black ? "走私 · " : "") + c.FullName, key = c => c.name, color = c => c.black ? Theme.Warn : Theme.Text },
                 new Column<CaravanInfo> { title = "星系", width = 110, text = c => c.galaxyName + c.NotVisitedTag, key = c => c.galaxyName, color = c => c.observe >= 2 ? Theme.Text : Theme.Text2 },
                 new Column<CaravanInfo> { title = "距舰队", width = 90, text = c => Fmt.Dist(c.fleetAu), key = c => c.fleetAu < 0 ? (IComparable)null : c.fleetAu, numeric = true, align = TextAlignmentOptions.MidlineRight },
                 new Column<CaravanInfo> { title = "还剩", width = 90, text = c => Left(c.leftMM), key = c => c.leftMM < 0 ? long.MaxValue : c.leftMM, numeric = true, align = TextAlignmentOptions.MidlineRight },
-                new Column<CaravanInfo> { title = "关系", width = 60, text = c => c.present ? c.relation : "未出场", key = c => c.relation, color = c => c.hostile ? Theme.Bad : Theme.Text2 },
+                new Column<CaravanInfo> { title = "关系", width = 60, text = c => c.present ? c.relation : c.kept ? "不在场景" : "未出场", key = c => c.relation, color = c => c.hostile ? Theme.Bad : Theme.Text2 },
+                new Column<CaravanInfo> { title = "", width = 70, buttonText = c => Tracker.IsTracked(c.uid) ? "追踪中" : "追踪", buttonPrimary = c => Tracker.IsTracked(c.uid),
+                    onButton = c => { if (Tracker.IsTracked(c.uid)) Tracker.Stop(); else Tracker.Track(c); } },
             };
             list = new Table<CaravanInfo>(root, 0, 40, LW, w.BodyH - 40, ccols, 2, false);
             list.onRowClick = c => { selected = c; selectedUid = c.uid; ShowLines(); };
@@ -332,13 +336,13 @@ namespace TradeHelper.Ui
                 head.text = "<b>黑潮走私船  " + c.FullName + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    还剩 " + Left(c.leftMM)
                     + "\n<size=13><color=#A4A5A6>走私船没有交易窗口，只能在对话里选固定的买卖：买方铀矿石、氦-3（每支船各卖一次）、导航核心；"
                     + "“出售货舱里的可疑货物”会把舰队货舱里它清单上的货（辐射物、器官和义体、舰炮、生物材料，共 " + c.smugglerListSize + " 种）一次全卖掉，每个按固定基价 ×2，不扣税，每支船只收一次。"
-                    + (c.smugglerSold ? "<color=#D8982F>这支船已经收过一次。</color>" : c.smugglerSaleKinds > 0 ? "现在卖给它：" + c.smugglerSaleKinds + " 种货，一共 " + Fmt.Money(c.smugglerSaleTotal) + "。" : "你货舱里现在没有它收的货。")
+                    + (c.smugglerSold ? "<color=#D8982F>这支船已经收过一次。</color>" : c.smugglerSaleKinds > 0 ? "现在卖给它：" + c.smugglerSaleKinds + " 种货，一共 " + Fmt.Money(c.smugglerSaleTotal) + "。" : "你舰队货舱里现在没有它收的货（下面数量为 0 的就是它收的）。")
                     + "不进结账记录（游戏不把对话买卖算作结账）。"
                     + (string.IsNullOrEmpty(c.priceNote) ? "" : "  <color=#D8982F>" + c.priceNote + "</color>") + "</color></size>";
                 lines.SetData(c.lines);
                 return;
             }
-            if (!c.present)
+            if (!c.present && c.lines.Count == 0)
             {
                 head.text = "<b>" + c.kind + "  " + c.FullName + "</b>    " + (c.force ?? "") + "    " + c.galaxyName + c.NotVisitedTag + "（" + c.status + "）    距舰队 " + Fmt.Dist(c.fleetAu) + "    还剩 " + Left(c.leftMM)
                     + "\n<size=13><color=#D8982F>" + c.priceNote + "</color></size>";
