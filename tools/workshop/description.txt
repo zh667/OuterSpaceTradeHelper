@@ -20,6 +20,7 @@
 [*]只读取游戏数据，不改存档；只有你在“后台补算”页主动选择的站会被补算（等于你打开了那个站）。默认什么都不补算。
 [*]补算很多站或一键初始化时游戏会卡一阵（游戏自己结算产生的垃圾回收），面板里有提示。
 [*]遇到问题可以点面板上的“截图反馈”，并附上性能日志 [i]C:/Users/<用户名>/AppData/LocalLow/CatStudio/Outer Space/TradeHelper/perf.log[/i]。
+[*]联系方式：QQ 3257696116
 [*]源代码（GPL-3.0）：https://github.com/zh667/OuterSpaceTradeHelper
 [*]非官方模组，与游戏开发商无关。
 [/list]
