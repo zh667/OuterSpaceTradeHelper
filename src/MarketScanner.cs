@@ -291,6 +291,7 @@ namespace TradeHelper
         public List<SellIdea> sells = new List<SellIdea>();
         // Caravans and suspicious caravans (smuggler fleets) the player can trade with (Caravans.Scan).
         public List<CaravanInfo> caravans = new List<CaravanInfo>();
+        public int rereadNewObject, rereadChanged, rereadNew;
         public List<SmugglerSpot> smugglerSpots = new List<SmugglerSpot>();
         public long scanMs;
         public int marketsDone, marketsTotal, marketsReused;
@@ -660,13 +661,30 @@ namespace TradeHelper
                     }
                     continue;
                 }
+                // Planet ground markets (地面交易行): the fleet cannot trade there and the panel no longer shows them, so
+                // their goods are not read (the largest one took a whole second in one step). Only name and place are kept.
+                if (m.planet && !cfg.includeGround)
+                {
+                    SetWhere(m, snap);
+                    m.fleetAu = snap.RouteAu(snap.fleetGalaxyId, m.galaxyId);
+                    snap.markets.Add(m);
+                    if (Budget.Over) yield return null;
+                    continue;
+                }
                 long fp = 0;
+                long tf0 = Perf.Now;
                 try { fp = Fingerprint(kv.Key); } catch { fp = 0; }
+                SlowCall(m, "指纹", tf0);
+                // Why a station is read again (diagnostic for perf.log): the game gave it a new object, or its numbers moved.
+                if (prevByUid.TryGetValue(m.uid, out old)) { if (old.ex != kv.Key) snap.rereadNewObject++; else if (old.fingerprint != fp || fp == 0) snap.rereadChanged++; }
+                else snap.rereadNew++;
                 if (fp != 0 && prevByUid.TryGetValue(m.uid, out old) && old.fingerprint == fp && old.ex == kv.Key)
                 {
                     MarketCache omc;
                     econCache.TryGetValue(m.uid, out omc);
+                    long ts0 = Perf.Now;
                     bool ok = !old.Exact || SpotCheck(kv.Key, old, omc, kv.Key.itemList != null ? new List<FWExchangeSpaceGoods>(kv.Key.itemList) : null);
+                    SlowCall(old, "抽查", ts0);
                     if (ok)
                     {
                         // Nothing this station's numbers depend on has changed: keep its quotes.
@@ -705,8 +723,18 @@ namespace TradeHelper
             yield return null;
 
             snap.phase = "读商队";
-            try { Caravans.Scan(gd, snap, cfg); }
-            catch (Exception e) { snap.errors.Add("读商队失败: " + e.Message); }
+            {
+                System.Collections.IEnumerator cs = null;
+                try { cs = Caravans.ScanSteps(gd, snap, cfg); } catch (Exception e) { snap.errors.Add("读商队失败: " + e.Message); }
+                while (cs != null)
+                {
+                    bool more;
+                    try { more = cs.MoveNext(); }
+                    catch (Exception e) { snap.errors.Add("读商队失败: " + e.Message); break; }
+                    if (!more) break;
+                    yield return null;
+                }
+            }
             yield return null;
 
             unchecked
@@ -927,18 +955,36 @@ namespace TradeHelper
 
         static bool Same(Econ a, Econ b) => a.pool == b.pool && a.lean == b.lean;
 
+        // One game call that took long in a single step (it cannot be split): noted for perf.log.
+        public static string SlowCalls = "";
+        static int lastGcSeen;
+        static void SlowCall(MarketInfo m, string what, long t0)
+        {
+            double ms = Perf.Ms(Perf.Now - t0);
+            int gc = GC.CollectionCount(0);
+            if (ms >= 100) { SlowCalls += (SlowCalls.Length > 0 ? "；" : "") + m.name + " " + what + " " + ms.ToString("0") + "ms" + (gc != lastGcSeen ? "（期间有垃圾回收）" : ""); if (SlowCalls.Length > 600) SlowCalls = SlowCalls.Substring(0, 600); }
+            lastGcSeen = gc;
+        }
+
         static IEnumerator ScanMarket(FWExchangeSpace ex, MarketInfo m, Snapshot snap)
         {
             m.ex = ex;
             m.initialized = ex.storeInitialized && ex.itemList != null;
             m.pendingDays = ex.pendingSettlementDays != null ? ex.pendingSettlementDays.Count : 0;
+            long tc0 = Perf.Now;
             m.tax = TradeTax(ex);
+            SlowCall(m, "交易税", tc0);
             if (!m.initialized) yield break;
             bool exact = m.Exact;
             float S = 1f, BG = 0f;
+            tc0 = Perf.Now;
             try { S = ex.getTradeS(); } catch { }
+            SlowCall(m, "getTradeS", tc0); tc0 = Perf.Now;
             try { BG = ex.getBGlobal(); } catch { }
+            SlowCall(m, "getBGlobal", tc0);
+            long ti0 = Perf.Now;
             var items = new List<FWExchangeSpaceGoods>(ex.itemList); // the list belongs to the game: copy
+            SlowCall(m, "货单", ti0); ti0 = Perf.Now;
 
             // getEPool and getLStellar do not settle the market (they read the stations and trade rules), so markets that
             // owe days use them too, through the same cache.
@@ -974,11 +1020,17 @@ namespace TradeHelper
                 }
             }
 
+            long gStart = 0; string gId = null;
+            SlowCall(m, "经济缓存核对", ti0);
             foreach (var it in items)
             {
+                // The previous goods' work (one step that cannot be split).
+                if (gStart != 0) SlowCall(m, "货 " + gId, gStart);
+                gStart = Perf.Now; gId = it?.GoodID;
                 if (Budget.Over)
                 {
                     yield return null;
+                    gStart = Perf.Now;
                     // A new game day may have queued a settlement day while we were paused: from then on this
                     // market must not be touched by the exact (settling) price functions.
                     if (exact && ex.hasPendingSettlement()) { exact = false; m.pendingDays = ex.pendingSettlementDays.Count; }

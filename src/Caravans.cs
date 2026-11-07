@@ -216,10 +216,18 @@ namespace TradeHelper
             return true;
         }
 
+        // All at once (tests).
         public static void Scan(FWGameData gd, Snapshot snap, Config cfg)
         {
+            var e = ScanSteps(gd, snap, cfg);
+            while (e.MoveNext()) { }
+        }
+
+        // A step per priced caravan, so one frame never prices them all (a caravan's lists hold up to ~200 goods).
+        public static System.Collections.IEnumerator ScanSteps(FWGameData gd, Snapshot snap, Config cfg)
+        {
             var repo = gd.factionFleetRepository;
-            if (repo == null) return;
+            if (repo == null) yield break;
             long now = gd.elapsedMM;
             long playerUid = -1;
             List<FWThingBean> hold = null;
@@ -246,6 +254,7 @@ namespace TradeHelper
                     if (q.sell1 > 0 && (!bestSell.TryGetValue(q.gid, out b) || q.sell1 > b.sell1)) bestSell[q.gid] = q;
                     if (q.buyable && q.buy1 > 0 && (!bestBuy.TryGetValue(q.gid, out b) || q.buy1 < b.buy1)) bestBuy[q.gid] = q;
                 }
+            yield return null;
 
             foreach (var f in new List<FWFactionFleet>(repo))
             {
@@ -268,6 +277,7 @@ namespace TradeHelper
                     c.priceNote = "读这支商队时出错：" + e.Message;
                 }
                 if (c != null) snap.caravans.Add(c);
+                if (c != null && c.present) yield return null;
             }
             snap.caravans.Sort((a, b) =>
             {
@@ -294,9 +304,22 @@ namespace TradeHelper
                 canCreate = t?.GetMethod("CanCreate", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public, null, new[] { typeof(FWGameData), typeof(string), typeof(int) }, null);
             }
             if (canCreate == null) return -1;
-            try { return (bool)canCreate.Invoke(null, new object[] { gd, galaxyId, (int)GalaxyNPCFleetType.Smuggler }) ? 1 : 0; }
-            catch { return -1; }
+            // A galaxy's market and ports change rarely: the answer is kept for the game day (every scan asked it for
+            // ~100 galaxies, the slowest part of reading caravans).
+            long day = gd.elapsedMM / 1440000L;
+            KeyValuePair<long, int> hit;
+            if (hostCache.TryGetValue(galaxyId, out hit) && hit.Key == day) return hit.Value;
+            int r;
+            try { r = (bool)canCreate.Invoke(null, new object[] { gd, galaxyId, (int)GalaxyNPCFleetType.Smuggler }) ? 1 : 0; }
+            catch { r = -1; }
+            hostCache[galaxyId] = new KeyValuePair<long, int>(day, r);
+            return r;
         }
+        static readonly Dictionary<string, KeyValuePair<long, int>> hostCache = new Dictionary<string, KeyValuePair<long, int>>();
+
+        // Spawn points already worked out, by galaxy, slot, day and next check (the plan is the same for the same inputs).
+        class PredHit { public string key; public Vector2 start; public List<Vector2> route; public long day, from, until; public int slot; public string note; public bool ok; }
+        static readonly Dictionary<string, PredHit> predCache = new Dictionary<string, PredHit>();
 
         // The smuggler the game would create on entering the galaxy view today (NomadicFleetSpawnService.TrySpawn):
         // slot = the first "nomadic-low-frequency:<galaxy>:smuggler:<i>" no unsettled fleet holds; seed = FNV-1a of
@@ -325,6 +348,34 @@ namespace TradeHelper
         public static long DayAt(long mm) => mm < NoonMM ? 0 : (mm - NoonMM) / DayMM;
 
         static void Predict(FWGameData gd, string galaxyId, List<FWFactionFleet> repo, SmugglerSpot s)
+        {
+            // The inputs first (cheap); the game's plan only when they changed.
+            int slot0 = -1;
+            for (int i = 0; i < 64 && slot0 < 0; i++)
+            {
+                string key0 = "nomadic-low-frequency:" + galaxyId + ":smuggler:" + i;
+                bool used0 = false;
+                foreach (var f in repo) if (f != null && !f.resultSettled && f.activityTargetKey == key0) { used0 = true; break; }
+                if (!used0) slot0 = i;
+            }
+            long from0 = Math.Max(gd.elapsedMM, s.nextCheckMM);
+            long day0 = from0 <= gd.elapsedMM ? gd.ForceTime_Day : DayAt(from0);
+            string ck = slot0 + "|" + day0 + "|" + s.nextCheckMM / 60000L;
+            PredHit ph;
+            if (predCache.TryGetValue(galaxyId, out ph) && ph.key == ck)
+            {
+                s.predicted = ph.ok; s.predStart = ph.start; s.predRoute = ph.route; s.predDay = ph.day; s.predSlot = ph.slot; s.predNote = ph.note;
+                s.predFromMM = from0; s.predUntilMM = ph.until;
+                return;
+            }
+            try { PredictFresh(gd, galaxyId, repo, s); }
+            finally
+            {
+                predCache[galaxyId] = new PredHit { key = ck, ok = s.predicted, start = s.predStart, route = s.predRoute, day = s.predDay, slot = s.predSlot, until = s.predUntilMM, note = s.predNote };
+            }
+        }
+
+        static void PredictFresh(FWGameData gd, string galaxyId, List<FWFactionFleet> repo, SmugglerSpot s)
         {
             var star = GalaxyMapData.getInstance()?.getGalaxyStar(galaxyId);
             if (star == null) { s.predNote = "找不到这个星系"; return; }
@@ -362,8 +413,10 @@ namespace TradeHelper
 
         public const long RefreshIntervalMM = 7200000L;   // NomadicFleetSpawnRules.RefreshInterval: 5 game days
 
+        static object cacheGame;
         static void Forecast(FWGameData gd, Snapshot snap, List<FWFactionFleet> repo, Dictionary<string, int> observe)
         {
+            if (!ReferenceEquals(cacheGame, gd)) { cacheGame = gd; hostCache.Clear(); predCache.Clear(); }
             snap.smugglerSpots.Clear();
             var gals = gd.galaxyBlock?.knownGalaxies;
             if (gals == null) return;
